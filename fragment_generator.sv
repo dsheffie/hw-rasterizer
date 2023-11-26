@@ -8,6 +8,13 @@ module fragment_generator(clk,rst,start,
 			  pop_frag,
 			  frag_val,
 			  frag,
+
+			  x_out,
+			  y_out,
+			  w0_out,
+			  w1_out,
+			  w2_out,
+			  
 			  done
 			  );
    input logic clk;
@@ -32,6 +39,15 @@ module fragment_generator(clk,rst,start,
    input logic pop_frag;
    output logic       frag_val;
    output fragment_t frag;
+
+
+   output logic [31:0] x_out;
+   output logic [31:0] y_out;
+
+   output logic [31:0] w0_out;
+   output logic [31:0] w1_out;
+   output logic [31:0] w2_out;
+   
    output logic done;
    
    
@@ -72,6 +88,13 @@ module fragment_generator(clk,rst,start,
    assign frag = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]];
    assign frag_val = r_fifo_head_ptr != r_fifo_tail_ptr;
 
+   assign x_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].x;
+   assign y_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].y;
+   assign w0_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].w0;
+   assign w1_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].w1;
+   assign w2_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].w2;      
+
+   
    wire w_fifo_full = (r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0] == r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]) && 
 	(r_fifo_head_ptr[`LG_FRAG_FIFO_SZ] != r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ]);
    
@@ -288,9 +311,9 @@ module fragment_generator(clk,rst,start,
 		    n_w1_00 = w1_00;
 		    n_w2_00 = w2_00;
 		    
-		    n_w0 = r_w0;
-		    n_w1 = r_w1;
-		    n_w2 = r_w2;
+		    n_w0 = w0_00;
+		    n_w1 = w1_00;
+		    n_w2 = w2_00;
 		    
 		    n_state = GEN_W0;
 		 end
