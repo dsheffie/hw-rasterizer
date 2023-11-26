@@ -55,7 +55,6 @@ module fragment_generator(clk,rst,start,
    
    logic 	      r_done, n_done;
    
-   logic [`LG_FRAG_FIFO_SZ:0] r_credits, n_credits;
    localparam FRAG_FIFO_SZ = 1 << `LG_FRAG_FIFO_SZ;
 
    logic [`LG_FRAG_FIFO_SZ:0] r_fifo_head_ptr, n_fifo_head_ptr;
@@ -73,6 +72,9 @@ module fragment_generator(clk,rst,start,
    assign frag = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]];
    assign frag_val = r_fifo_head_ptr != r_fifo_tail_ptr;
 
+   wire w_fifo_full = (r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0] == r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]) && 
+	(r_fifo_head_ptr[`LG_FRAG_FIFO_SZ] != r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ]);
+   
    state_t r_last_states[`FP_ADD_LAT:0];
    logic [31:0] t_add_srcA, t_add_srcB;
    logic 	t_add_start, t_add_sub;
@@ -96,6 +98,11 @@ module fragment_generator(clk,rst,start,
 	       end	     
 	  end
      end
+
+   wire 	 w_w0_not_negative = (r_w0[30:0] == 'd0) || (r_w0[31] == 1'b0);
+   wire 	 w_w1_not_negative = (r_w1[30:0] == 'd0) || (r_w1[31] == 1'b0);
+   wire 	 w_w2_not_negative = (r_w2[30:0] == 'd0) || (r_w2[31] == 1'b0);
+   wire 	 w_point_in_tri = w_w0_not_negative && w_w1_not_negative && w_w2_not_negative;
    
    always_ff@(posedge clk)
      begin
@@ -123,7 +130,6 @@ module fragment_generator(clk,rst,start,
 	     r_fifo_head_ptr <= 'd0;
 	     r_fifo_tail_ptr <= 'd0;
 	     r_state <= IDLE;
-	     r_credits <= 'd0;
 	     r_done <= 1'b0;
 	  end
 	else
@@ -151,19 +157,20 @@ module fragment_generator(clk,rst,start,
 	     r_fifo_head_ptr <= n_fifo_head_ptr;
 	     r_fifo_tail_ptr <= n_fifo_tail_ptr;
 	     r_state <= n_state;
-	     r_credits <= n_credits;
 	     r_done <= n_done;
 	  end
      end // always_ff@ (posedge clk)
 
 
-   logic t_start;
+   logic t_push_fifo;
+   fragment_t t_frag;
+   
    always_comb
      begin
 	n_fifo_tail_ptr = r_fifo_tail_ptr;
 	n_fifo_head_ptr = r_fifo_head_ptr;
 
-	if(t_start)
+	if(t_push_fifo)
 	  begin
 	     n_fifo_tail_ptr = r_fifo_tail_ptr + 'd1;
 	  end
@@ -173,12 +180,21 @@ module fragment_generator(clk,rst,start,
 	  end
      end // always_comb
 
+   always_ff@(posedge clk)
+     begin
+	if(t_push_fifo)
+	  begin
+	     r_frag_fifo[r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]] <= t_frag;
+	  end
+     end
+   
        
    wire [31:0] w_x = r_x + 'd1;
 
    always_ff@(negedge clk)
      begin
-	if(t_start)
+	//$display("state = %d", r_state);
+	if(t_push_fifo)
 	  begin
 	     $display("start x=%d, y=%d", r_x, r_y);
 	  end
@@ -208,16 +224,21 @@ module fragment_generator(clk,rst,start,
 	n_y = r_y;
 	n_x = r_x;
 	n_state = r_state;
-	n_credits = r_credits;
 	n_done = 1'b0;
 
-	t_start = 1'b0;
+	t_push_fifo = 1'b0;
 
 	t_add_srcA = r_w0;
 	t_add_srcB = r_l0_dy;
 	t_add_start = 1'b0;
 	t_add_sub = 1'b0;
 
+	t_frag.w0 = r_w0;
+	t_frag.w1 = r_w1;
+	t_frag.w2 = r_w2;
+	t_frag.x = r_x;
+	t_frag.y = r_y;
+		
 	if(r_last_states[`FP_ADD_LAT-1] == GEN_W0)
 	  begin
 	     n_w0 = w_adder_out;
@@ -272,16 +293,16 @@ module fragment_generator(clk,rst,start,
 		    n_w2 = r_w2;
 		    
 		    n_state = GEN_W0;
-		    n_credits = FRAG_FIFO_SZ;
 		 end
 	    end
 	  GEN_W0:
 	    begin
-	       //check if there are enough credits available, if not - do nothing
-	       if(r_credits != 'd0)
+	       if(!w_fifo_full)
 		 begin
-		    t_start = 1'b1;
-		    n_credits = pop_frag ? r_credits : (r_credits - 'd1);
+		    if(w_point_in_tri)
+		      begin
+			 t_push_fifo = 1'b1;
+		      end
 		    n_state = GEN_W1;
 		    t_add_srcA = r_w0;
 		    t_add_srcB = r_l0_dy;
@@ -291,17 +312,16 @@ module fragment_generator(clk,rst,start,
 	  GEN_W1:
 	    begin
 	       n_state = GEN_W2;
-	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
 	       t_add_srcA = r_w1;
 	       t_add_srcB = r_l1_dy;
 	       t_add_start = 1'b1;	       
 	    end
 	  GEN_W2:
 	    begin
-	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
 	       t_add_srcA = r_w2;
 	       t_add_srcB = r_l2_dy;
 	       t_add_start = 1'b1;
+	       
 	       if(w_x == r_xmax && n_y == r_ymax)
                 begin
                    n_done = 1'b1;

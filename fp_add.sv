@@ -1,3 +1,5 @@
+`define DEBUG_FPU
+
 `ifdef DEBUG_FPU
 import "DPI-C" function int fp32_add(input int a, input int b);
 import "DPI-C" function longint fp64_add(input longint a, input longint b);
@@ -310,7 +312,7 @@ module fp_add(/*AUTOARG*/
    
    always_ff@(negedge clk)
      begin
-	if(en && (t_dpi != w_y) && (t_dpi[W-2:FW] != w_y[W-2:FW]) && 1'b0)
+	if(en && (t_dpi != w_y) && (t_dpi[W-2:FW] != w_y[W-2:FW]))
 	  begin
     	     //$display("IN : a sign %b exp = %d, a frac = %x", 
    	     //a[W-1], a[W-2:FW], a[FW-1:0]);
