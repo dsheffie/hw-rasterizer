@@ -28,15 +28,19 @@ module fragment_generator(clk,rst,start,
    logic 	      r_done, n_done;
    
    logic [`LG_FRAG_FIFO_SZ:0] r_credits, n_credits;
-   
-   
    localparam FRAG_FIFO_SZ = 1 << `LG_FRAG_FIFO_SZ;
+
+   logic [`LG_FRAG_FIFO_SZ:0] r_fifo_head_ptr, n_fifo_head_ptr;
+   logic [`LG_FRAG_FIFO_SZ:0] r_fifo_tail_ptr, n_fifo_tail_ptr;
+   
+   fragment_t r_frag_fifo[FRAG_FIFO_SZ-1:0];
+   
       
    typedef enum logic [2:0] { IDLE = 0, RUN} state_t;
    state_t r_state, n_state;
 
    assign done = r_done;
-   
+   assign frag = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]];
    
    always_ff@(posedge clk)
      begin
@@ -48,6 +52,8 @@ module fragment_generator(clk,rst,start,
 	     r_xmax <= 'd0;
 	     r_y <= 'd0;
 	     r_x <= 'd0;
+	     r_fifo_head_ptr <= 'd0;
+	     r_fifo_tail_ptr <= 'd0;
 	     r_state <= IDLE;
 	     r_credits <= 'd0;
 	     r_done <= 1'b0;
@@ -60,6 +66,8 @@ module fragment_generator(clk,rst,start,
 	     r_xmax <= n_xmax;
 	     r_y <= n_y;
 	     r_x <= n_x;
+	     r_fifo_head_ptr <= n_fifo_head_ptr;
+	     r_fifo_tail_ptr <= n_fifo_tail_ptr;
 	     r_state <= n_state;
 	     r_credits <= n_credits;
 	     r_done <= n_done;
@@ -67,6 +75,23 @@ module fragment_generator(clk,rst,start,
      end // always_ff@ (posedge clk)
 
 
+   logic t_start;
+   always_comb
+     begin
+	n_fifo_tail_ptr = r_fifo_tail_ptr;
+	n_fifo_head_ptr = r_fifo_head_ptr;
+
+	if(t_start)
+	  begin
+	     n_fifo_tail_ptr = r_fifo_tail_ptr + 'd1;
+	  end
+	if(pop_frag)
+	  begin
+	     n_fifo_head_ptr = r_fifo_head_ptr + 'd1;
+	  end
+     end // always_comb
+
+       
    wire [31:0] w_x = r_x + 'd1;
    
    always_comb
@@ -80,6 +105,8 @@ module fragment_generator(clk,rst,start,
 	n_state = r_state;
 	n_credits = r_credits;
 	n_done = 1'b0;
+
+	t_start = 1'b0;
 	
 	case(r_state)
 	  IDLE:
@@ -101,6 +128,7 @@ module fragment_generator(clk,rst,start,
 	       //check if there are enough credits available, if not - do nothing
 	       if(r_credits != 'd0)
 		 begin
+		    t_start = 1'b1;
 		    n_credits = pop_frag ? r_credits : (r_credits - 'd1);
 		    if(w_x == r_xmax)
 		      begin
@@ -116,8 +144,13 @@ module fragment_generator(clk,rst,start,
 		      begin
 			 n_done = 1'b1;
 			 n_state = IDLE;
+			 $finish();
 		      end
 		 end // if (r_credits != 'd0)
+	       else
+		 begin
+		    $display("stalled due to lack of credits");
+		 end
 	    end
 	  default:
 	    begin
