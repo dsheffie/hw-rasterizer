@@ -1,7 +1,7 @@
 UNAME_S = $(shell uname -s)
 
 OBJ = verilated.o top.o 
-SV_SRC = fragment_generator.sv fp_add.sv
+SV_SRC = fragment_generator.sv fp_add.sv count_leading_zeros.sv
 
 CXX = clang++-12 -flto #-DUSE_SDL
 MAKE = make

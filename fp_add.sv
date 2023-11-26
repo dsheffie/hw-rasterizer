@@ -43,7 +43,35 @@ module zero_detector(
      end
 endmodule // zero_detector
 
+module dff(q,d,clk);
+   parameter N = 1;
+   input logic [N-1:0] d;
+   input logic 	       clk;
+   output logic [N-1:0] q;
+   always_ff@(posedge clk)
+     begin
+	q <= d;
+     end
+endmodule // dff
 
+module shiftreg(clk,in,out);
+   parameter W = 32;
+   parameter D = 4;
+   input logic clk;
+   input logic [W-1:0] in;
+   output logic [W-1:0] out;
+
+   logic [W-1:0] 	t_delay [D-1:0];
+   assign out = t_delay[D-1];
+   
+   dff #(.N(W) ) ff0(.clk(clk), .d(in), .q(t_delay[0]));
+   generate
+      for(genvar i = 1; i < D; i = i + 1)
+	begin:delay
+	   dff #(.N(W)) ff (.clk(clk), .d(t_delay[i-1]), .q(t_delay[i]));
+	end
+   endgenerate
+endmodule
 
 module fp_add(/*AUTOARG*/
    // Outputs

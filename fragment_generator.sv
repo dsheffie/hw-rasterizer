@@ -49,6 +49,7 @@ module fragment_generator(clk,rst,start,
    logic [31:0]       r_w2_00, n_w2_00;
    
    logic [31:0]       r_y, n_y, r_x, n_x;
+   
    logic [31:0]       r_w0, r_w1, r_w2;
    logic [31:0]       n_w0, n_w1, n_w2;
    
@@ -63,13 +64,39 @@ module fragment_generator(clk,rst,start,
    fragment_t r_frag_fifo[FRAG_FIFO_SZ-1:0];
    
       
-   typedef enum logic [2:0] { IDLE = 0, GEN_W0 = 1, GEN_W1 = 2, GEN_W2 =3} state_t;
+   typedef enum logic [2:0] { INVALID=0, IDLE, 
+			      GEN_W0, GEN_W1, GEN_W2,
+			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2} state_t;
    state_t r_state, n_state;
 
    assign done = r_done;
    assign frag = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]];
    assign frag_val = r_fifo_head_ptr != r_fifo_tail_ptr;
-		    
+
+   state_t r_last_states[`FP_ADD_LAT:0];
+   logic [31:0] t_add_srcA, t_add_srcB;
+   logic 	t_add_start, t_add_sub;
+   wire [31:0] 	w_adder_out;
+   
+   always_ff@(posedge clk)
+     begin
+	if(rst)
+	  begin
+	     for(integer i = 0; i <= (`FP_ADD_LAT); i=i+1)
+	       begin
+		  r_last_states[i] <= INVALID;
+	       end
+	  end
+	else
+	  begin
+	     r_last_states[0] <= t_add_start ? r_state : INVALID;
+	     for(integer i = 1; i <= (`FP_ADD_LAT); i=i+1)
+	       begin
+		  r_last_states[i] <= r_last_states[i-1];
+	       end	     
+	  end
+     end
+   
    always_ff@(posedge clk)
      begin
 	if(rst)
@@ -92,6 +119,7 @@ module fragment_generator(clk,rst,start,
 	     r_w2 <= 'd0;
 	     r_y <= 'd0;
 	     r_x <= 'd0;
+
 	     r_fifo_head_ptr <= 'd0;
 	     r_fifo_tail_ptr <= 'd0;
 	     r_state <= IDLE;
@@ -119,6 +147,7 @@ module fragment_generator(clk,rst,start,
 	     
 	     r_y <= n_y;
 	     r_x <= n_x;
+
 	     r_fifo_head_ptr <= n_fifo_head_ptr;
 	     r_fifo_tail_ptr <= n_fifo_tail_ptr;
 	     r_state <= n_state;
@@ -153,10 +182,9 @@ module fragment_generator(clk,rst,start,
 	  begin
 	     $display("start x=%d, y=%d", r_x, r_y);
 	  end
-	//$display("r_state = %d", r_state);
+	//$display("adder out %x", w_adder_out);
      end
 
-   logic [31:0] t_mul_srcA, t_mul_srcB;
    
    always_comb
      begin
@@ -176,7 +204,7 @@ module fragment_generator(clk,rst,start,
 	n_w0 = r_w0;
 	n_w1 = r_w1;
 	n_w2 = r_w2;
-	
+
 	n_y = r_y;
 	n_x = r_x;
 	n_state = r_state;
@@ -185,9 +213,38 @@ module fragment_generator(clk,rst,start,
 
 	t_start = 1'b0;
 
-	t_mul_srcA = r_w0;
-	t_mul_srcB = r_l0_dy;
-	
+	t_add_srcA = r_w0;
+	t_add_srcB = r_l0_dy;
+	t_add_start = 1'b0;
+	t_add_sub = 1'b0;
+
+	if(r_last_states[`FP_ADD_LAT-1] == GEN_W0)
+	  begin
+	     n_w0 = w_adder_out;
+	  end
+	else if(r_last_states[`FP_ADD_LAT-1] == GEN_W1)
+	  begin
+	     n_w1 = w_adder_out;
+	  end
+	else if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
+	  begin
+	     n_w2 = w_adder_out;
+	  end
+	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
+	  begin
+	     n_w0_00 = w_adder_out;
+	     n_w0 = w_adder_out;
+	  end
+	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W1)
+	  begin
+	     n_w1_00 = w_adder_out;
+	     n_w1 = w_adder_out;
+	  end
+	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
+	  begin
+	     n_w2_00 = w_adder_out;
+	     n_w2 = w_adder_out;
+	  end
 	
 	case(r_state)
 	  IDLE:
@@ -226,46 +283,68 @@ module fragment_generator(clk,rst,start,
 		    t_start = 1'b1;
 		    n_credits = pop_frag ? r_credits : (r_credits - 'd1);
 		    n_state = GEN_W1;
-		    t_mul_srcA = r_w0;
-		    t_mul_srcB = r_l0_dy;
+		    t_add_srcA = r_w0;
+		    t_add_srcB = r_l0_dy;
+		    t_add_start = 1'b1;
 		 end // if (r_credits != 'd0)
 	    end // case: GEN_W0
 	  GEN_W1:
 	    begin
 	       n_state = GEN_W2;
 	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
-	       t_mul_srcA = r_w1;
-	       t_mul_srcB = r_l1_dy;
+	       t_add_srcA = r_w1;
+	       t_add_srcB = r_l1_dy;
+	       t_add_start = 1'b1;	       
 	    end
 	  GEN_W2:
 	    begin
 	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
-	       t_mul_srcA = r_w2;
-	       t_mul_srcB = r_l2_dy;
-	       
-	       if(w_x == r_xmax)
+	       t_add_srcA = r_w2;
+	       t_add_srcB = r_l2_dy;
+	       t_add_start = 1'b1;
+	       if(w_x == r_xmax && n_y == r_ymax)
+                begin
+                   n_done = 1'b1;
+                   n_state = IDLE;
+                   $finish();
+                end
+	       else if(w_x == r_xmax)
 		 begin
-		    $finish();
+		    n_state = INCR_Y_W0;
 		    n_x = r_xmin;
 		    n_y = r_y + 'd1;
 		 end
 	       else
 		 begin
 		    n_x = w_x;
+		    n_state = GEN_W0;		    
 		 end
 	       
-	       if(w_x == r_xmax && n_y == r_ymax)
-		 begin
-		    n_done = 1'b1;
-		    n_state = IDLE;
-		    $finish();
-		 end
-	       else
-		 begin
-		    n_state = GEN_W0;
-		 end
 	    end // case: GEN_W2
-	  
+	  INCR_Y_W0:
+	    begin
+	       t_add_srcA = r_w0_00;
+	       t_add_srcB = r_l0_dx;
+	       t_add_start = 1'b1;	    
+	       t_add_sub = 1'b1;	          
+	       n_state = INCR_Y_W1;
+	    end
+	  INCR_Y_W1:
+	    begin
+	       t_add_srcA = r_w1_00;
+	       t_add_srcB = r_l1_dx;
+	       t_add_start = 1'b1;
+	       t_add_sub = 1'b1;	       	       
+	       n_state = INCR_Y_W2;
+	    end
+	  INCR_Y_W2:
+	    begin
+	       t_add_srcA = r_w2_00;
+	       t_add_srcB = r_l2_dx;
+	       t_add_start = 1'b1;
+	       t_add_sub = 1'b1;	       
+	       n_state = GEN_W0;
+	    end
 	  default:
 	    begin
 	    end
@@ -273,6 +352,11 @@ module fragment_generator(clk,rst,start,
      end // always_comb
    
    
-   
+   fp_add adder (.clk(clk), 
+		 .y(w_adder_out), 
+		 .a(t_add_srcA), 
+		 .b(t_add_srcB), 
+		 .en(t_add_start), 
+		 .sub(t_add_sub) );
 
 endmodule // fragment_generator
