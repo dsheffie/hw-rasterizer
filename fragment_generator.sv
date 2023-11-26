@@ -322,7 +322,7 @@ module fragment_generator(clk,rst,start,
 	    begin
 	       if(!w_fifo_full)
 		 begin
-		    if(w_point_in_tri)
+		    if(w_point_in_tri || 1'b1)
 		      begin
 			 t_push_fifo = 1'b1;
 		      end
