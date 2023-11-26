@@ -68,6 +68,14 @@ module fragment_generator(clk,rst,start,
    
    logic [31:0]       r_w0, r_w1, r_w2;
    logic [31:0]       n_w0, n_w1, n_w2;
+
+   logic [31:0]       n_last_x, r_last_x;
+   logic [31:0]       n_last_y, r_last_y;
+   
+   logic [31:0]       n_last_w0, r_last_w0;
+   logic [31:0]       n_last_w1, r_last_w1;
+   logic [31:0]       n_last_w2, r_last_w2;   
+   
    
    logic 	      r_done, n_done;
    
@@ -79,7 +87,7 @@ module fragment_generator(clk,rst,start,
    fragment_t r_frag_fifo[FRAG_FIFO_SZ-1:0];
    
       
-   typedef enum logic [2:0] { INVALID=0, IDLE, 
+   typedef enum logic [3:0] { INVALID=0, IDLE, INIT_FRAG, 
 			      GEN_W0, GEN_W1, GEN_W2,
 			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2} state_t;
    state_t r_state, n_state;
@@ -149,7 +157,11 @@ module fragment_generator(clk,rst,start,
 	     r_w2 <= 'd0;
 	     r_y <= 'd0;
 	     r_x <= 'd0;
-
+	     r_last_x <= 'd0;
+	     r_last_y <= 'd0;
+	     r_last_w0 <= 'd0;
+	     r_last_w1 <= 'd0;
+	     r_last_w2 <= 'd0;
 	     r_fifo_head_ptr <= 'd0;
 	     r_fifo_tail_ptr <= 'd0;
 	     r_state <= IDLE;
@@ -176,6 +188,11 @@ module fragment_generator(clk,rst,start,
 	     
 	     r_y <= n_y;
 	     r_x <= n_x;
+	     r_last_x <= n_last_x;
+	     r_last_y <= n_last_y;
+	     r_last_w0 <= n_last_w0;
+	     r_last_w1 <= n_last_w1;
+	     r_last_w2 <= n_last_w2;
 
 	     r_fifo_head_ptr <= n_fifo_head_ptr;
 	     r_fifo_tail_ptr <= n_fifo_tail_ptr;
@@ -224,6 +241,12 @@ module fragment_generator(clk,rst,start,
 	//$display("adder out %x", w_adder_out);
      end
 
+   logic [31:0] r_cycle;
+   always_ff@(posedge clk)
+     begin
+	r_cycle <= (rst) ? 'd0 : (r_cycle + 'd1);
+     end
+   
    
    always_comb
      begin
@@ -246,7 +269,15 @@ module fragment_generator(clk,rst,start,
 
 	n_y = r_y;
 	n_x = r_x;
-	n_state = r_state;
+
+	n_last_x = r_last_x;
+	n_last_y = r_last_y;	
+	n_last_w0 = r_last_w0;
+	n_last_w1 = r_last_w1;
+	n_last_w2 = r_last_w2;		
+	
+	
+	n_state = r_state;       
 	n_done = 1'b0;
 
 	t_push_fifo = 1'b0;
@@ -256,23 +287,25 @@ module fragment_generator(clk,rst,start,
 	t_add_start = 1'b0;
 	t_add_sub = 1'b0;
 
-	t_frag.w0 = r_w0;
-	t_frag.w1 = r_w1;
-	t_frag.w2 = r_w2;
-	t_frag.x = r_x;
-	t_frag.y = r_y;
 		
 	if(r_last_states[`FP_ADD_LAT-1] == GEN_W0)
 	  begin
 	     n_w0 = w_adder_out;
+	     n_last_w0 = w_adder_out;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == GEN_W1)
 	  begin
 	     n_w1 = w_adder_out;
+	     n_last_w1 = w_adder_out;
+	     $display("n_w1 = %x at cycle %d", n_w1, r_cycle);
+	     //$stop();
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
 	  begin
 	     n_w2 = w_adder_out;
+	     n_last_w2 = w_adder_out;
+	     $display("n_w2 = %x at cycle %d", n_w2, r_cycle);	     
+	     t_push_fifo = 1'b1;	     
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
 	  begin
@@ -281,6 +314,7 @@ module fragment_generator(clk,rst,start,
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W1)
 	  begin
+	     $display("INCR_Y_W1 clobbers n_w1 at cycle %d", r_cycle);
 	     n_w1_00 = w_adder_out;
 	     n_w1 = w_adder_out;
 	  end
@@ -289,6 +323,14 @@ module fragment_generator(clk,rst,start,
 	     n_w2_00 = w_adder_out;
 	     n_w2 = w_adder_out;
 	  end
+
+
+	t_frag.w0 = n_last_w0;
+	t_frag.w1 = n_last_w1;
+	t_frag.w2 = n_last_w2;
+	t_frag.x = n_last_x;
+	t_frag.y = n_last_y;
+
 	
 	case(r_state)
 	  IDLE:
@@ -315,19 +357,27 @@ module fragment_generator(clk,rst,start,
 		    n_w1 = w1_00;
 		    n_w2 = w2_00;
 		    
-		    n_state = GEN_W0;
+		    n_last_w0 = w0_00;
+		    n_last_w1 = w1_00;
+		    n_last_w2 = w2_00;
+
+		    n_last_x = xmin;
+		    n_last_y = ymin;
+
+		    n_state = INIT_FRAG;
 		 end
+	    end // case: IDLE
+	  INIT_FRAG:
+	    begin
+	       t_push_fifo = 1'b1;
+	       n_state = GEN_W0;	       
 	    end
 	  GEN_W0:
 	    begin
 	       if(!w_fifo_full)
 		 begin
-		    if(w_point_in_tri || 1'b1)
-		      begin
-			 t_push_fifo = 1'b1;
-		      end
 		    n_state = GEN_W1;
-		    t_add_srcA = r_w0;
+		    t_add_srcA = n_w0;
 		    t_add_srcB = r_l0_dy;
 		    t_add_start = 1'b1;
 		 end // if (r_credits != 'd0)
@@ -335,13 +385,13 @@ module fragment_generator(clk,rst,start,
 	  GEN_W1:
 	    begin
 	       n_state = GEN_W2;
-	       t_add_srcA = r_w1;
+	       t_add_srcA = n_w1;
 	       t_add_srcB = r_l1_dy;
 	       t_add_start = 1'b1;	       
 	    end
 	  GEN_W2:
 	    begin
-	       t_add_srcA = r_w2;
+	       t_add_srcA = n_w2;
 	       t_add_srcB = r_l2_dy;
 	       t_add_start = 1'b1;
 	       
