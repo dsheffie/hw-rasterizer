@@ -2,6 +2,7 @@
  `define __rasterizerhdr__
 
  `define LG_FRAG_FIFO_SZ 4
+ `define FP_ADD_LAT 2
 
 typedef struct packed {
    logic [31:0] w0;

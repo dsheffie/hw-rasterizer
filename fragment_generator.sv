@@ -49,6 +49,9 @@ module fragment_generator(clk,rst,start,
    logic [31:0]       r_w2_00, n_w2_00;
    
    logic [31:0]       r_y, n_y, r_x, n_x;
+   logic [31:0]       r_w0, r_w1, r_w2;
+   logic [31:0]       n_w0, n_w1, n_w2;
+   
    logic 	      r_done, n_done;
    
    logic [`LG_FRAG_FIFO_SZ:0] r_credits, n_credits;
@@ -84,6 +87,9 @@ module fragment_generator(clk,rst,start,
              r_w0_00 <= 'd0;
              r_w1_00 <= 'd0;
              r_w2_00 <= 'd0;
+	     r_w0 <= 'd0;
+	     r_w1 <= 'd0;
+	     r_w2 <= 'd0;
 	     r_y <= 'd0;
 	     r_x <= 'd0;
 	     r_fifo_head_ptr <= 'd0;
@@ -107,6 +113,9 @@ module fragment_generator(clk,rst,start,
              r_w0_00 <= n_w0_00;
              r_w1_00 <= n_w1_00;
              r_w2_00 <= n_w2_00;
+	     r_w0 <= n_w0;
+	     r_w1 <= n_w1;
+	     r_w2 <= n_w2;	     
 	     
 	     r_y <= n_y;
 	     r_x <= n_x;
@@ -146,6 +155,8 @@ module fragment_generator(clk,rst,start,
 	  end
 	//$display("r_state = %d", r_state);
      end
+
+   logic [31:0] t_mul_srcA, t_mul_srcB;
    
    always_comb
      begin
@@ -162,6 +173,9 @@ module fragment_generator(clk,rst,start,
 	n_w0_00 = r_w0_00;
 	n_w1_00 = r_w1_00;
 	n_w2_00 = r_w2_00;
+	n_w0 = r_w0;
+	n_w1 = r_w1;
+	n_w2 = r_w2;
 	
 	n_y = r_y;
 	n_x = r_x;
@@ -170,6 +184,10 @@ module fragment_generator(clk,rst,start,
 	n_done = 1'b0;
 
 	t_start = 1'b0;
+
+	t_mul_srcA = r_w0;
+	t_mul_srcB = r_l0_dy;
+	
 	
 	case(r_state)
 	  IDLE:
@@ -192,6 +210,9 @@ module fragment_generator(clk,rst,start,
 		    n_w1_00 = w1_00;
 		    n_w2_00 = w2_00;
 		    
+		    n_w0 = r_w0;
+		    n_w1 = r_w1;
+		    n_w2 = r_w2;
 		    
 		    n_state = GEN_W0;
 		    n_credits = FRAG_FIFO_SZ;
@@ -205,18 +226,26 @@ module fragment_generator(clk,rst,start,
 		    t_start = 1'b1;
 		    n_credits = pop_frag ? r_credits : (r_credits - 'd1);
 		    n_state = GEN_W1;
+		    t_mul_srcA = r_w0;
+		    t_mul_srcB = r_l0_dy;
 		 end // if (r_credits != 'd0)
 	    end // case: GEN_W0
 	  GEN_W1:
 	    begin
 	       n_state = GEN_W2;
-	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;	       
+	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
+	       t_mul_srcA = r_w1;
+	       t_mul_srcB = r_l1_dy;
 	    end
 	  GEN_W2:
 	    begin
 	       n_credits = pop_frag ? r_credits + 'd1 : r_credits;
+	       t_mul_srcA = r_w2;
+	       t_mul_srcB = r_l2_dy;
+	       
 	       if(w_x == r_xmax)
 		 begin
+		    $finish();
 		    n_x = r_xmin;
 		    n_y = r_y + 'd1;
 		 end
