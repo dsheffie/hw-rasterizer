@@ -83,7 +83,8 @@ module fragment_generator(clk,rst,start,
 
    logic [`LG_FRAG_FIFO_SZ:0] r_fifo_head_ptr, n_fifo_head_ptr;
    logic [`LG_FRAG_FIFO_SZ:0] r_fifo_tail_ptr, n_fifo_tail_ptr;
-   
+
+   logic [`LG_FRAG_FIFO_SZ:0] r_credits, n_credits;
    fragment_t r_frag_fifo[FRAG_FIFO_SZ-1:0];
    
       
@@ -168,6 +169,7 @@ module fragment_generator(clk,rst,start,
 	     r_fifo_tail_ptr <= 'd0;
 	     r_state <= IDLE;
 	     r_done <= 1'b0;
+	     r_credits <= FRAG_FIFO_SZ;
 	  end
 	else
 	  begin
@@ -200,6 +202,7 @@ module fragment_generator(clk,rst,start,
 	     r_fifo_tail_ptr <= n_fifo_tail_ptr;
 	     r_state <= n_state;
 	     r_done <= n_done;
+	     r_credits <= n_credits;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -217,8 +220,18 @@ module fragment_generator(clk,rst,start,
      begin
 	n_fifo_tail_ptr = r_fifo_tail_ptr;
 	n_fifo_head_ptr = r_fifo_head_ptr;
-
+	n_credits = r_credits;
+	
 	t_push_fifo = r_push_fifo ? w_point_in_tri : 1'b0;
+
+	if(t_push_fifo && !pop_frag)
+	  begin
+	     n_credits = r_credits - 'd1;
+	  end
+	else if(!t_push_fifo && pop_frag)
+	  begin
+	     n_credits = r_credits + 'd1;
+	  end
 	
 	if(t_push_fifo)
 	  begin
@@ -397,7 +410,7 @@ module fragment_generator(clk,rst,start,
 	    end
 	  GEN_W0:
 	    begin
-	       if(!w_fifo_full)
+	       if(r_credits > 'd1)
 		 begin
 		    n_state = GEN_W1;
 		    t_add_srcA = n_w0;
