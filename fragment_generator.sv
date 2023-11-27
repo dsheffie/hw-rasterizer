@@ -90,7 +90,8 @@ module fragment_generator(clk,rst,start,
    typedef enum logic [3:0] { INVALID=0, IDLE, INIT_FRAG, 
 			      GEN_W0, GEN_W1, GEN_W2,
 			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2,
-			      DELAY_0, DELAY_1, DONE_DRAIN} state_t;
+			      DELAY_0, DELAY_1, 
+			      DONE_DRAIN, ASSERT_DONE} state_t;
    state_t r_state, n_state;
 
    assign done = r_done;
@@ -103,9 +104,9 @@ module fragment_generator(clk,rst,start,
    assign w1_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].w1;
    assign w2_out = r_frag_fifo[r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0]].w2;      
 
-   
-   wire w_fifo_full = (r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0] == r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]) && 
-	(r_fifo_head_ptr[`LG_FRAG_FIFO_SZ] != r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ]);
+   wire 	w_fifo_empty = r_fifo_head_ptr == r_fifo_tail_ptr;
+   wire 	w_fifo_full = (r_fifo_head_ptr[`LG_FRAG_FIFO_SZ-1:0] == r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]) && 
+		(r_fifo_head_ptr[`LG_FRAG_FIFO_SZ] != r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ]);
    
    state_t r_last_states[`FP_ADD_LAT:0];
    logic [31:0] t_add_srcA, t_add_srcB;
@@ -131,9 +132,9 @@ module fragment_generator(clk,rst,start,
 	  end
      end
 
-   wire 	 w_w0_not_negative = (r_w0[30:0] == 'd0) || (r_w0[31] == 1'b0);
-   wire 	 w_w1_not_negative = (r_w1[30:0] == 'd0) || (r_w1[31] == 1'b0);
-   wire 	 w_w2_not_negative = (r_w2[30:0] == 'd0) || (r_w2[31] == 1'b0);
+   wire 	 w_w0_not_negative = (r_frag.w0[30:0] == 'd0) || (r_frag.w0[31] == 1'b0);
+   wire 	 w_w1_not_negative = (r_frag.w1[30:0] == 'd0) || (r_frag.w1[31] == 1'b0);
+   wire 	 w_w2_not_negative = (r_frag.w2[30:0] == 'd0) || (r_frag.w2[31] == 1'b0);
    wire 	 w_point_in_tri = w_w0_not_negative && w_w1_not_negative && w_w2_not_negative;
    
    always_ff@(posedge clk)
@@ -203,14 +204,22 @@ module fragment_generator(clk,rst,start,
      end // always_ff@ (posedge clk)
 
 
-   logic t_push_fifo;
-   fragment_t t_frag;
+   logic r_push_fifo, t_push_fifo, t_frag_done;
+   fragment_t r_frag, t_frag;
+
+   always_ff@(posedge clk)
+     begin
+	r_push_fifo <= rst ? 1'b0 : t_frag_done;
+	r_frag <= t_frag;
+     end
    
    always_comb
      begin
 	n_fifo_tail_ptr = r_fifo_tail_ptr;
 	n_fifo_head_ptr = r_fifo_head_ptr;
 
+	t_push_fifo = r_push_fifo ? w_point_in_tri : 1'b0;
+	
 	if(t_push_fifo)
 	  begin
 	     n_fifo_tail_ptr = r_fifo_tail_ptr + 'd1;
@@ -225,7 +234,7 @@ module fragment_generator(clk,rst,start,
      begin
 	if(t_push_fifo)
 	  begin
-	     r_frag_fifo[r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]] <= t_frag;
+	     r_frag_fifo[r_fifo_tail_ptr[`LG_FRAG_FIFO_SZ-1:0]] <= r_frag;
 	  end
      end
    
@@ -282,8 +291,9 @@ module fragment_generator(clk,rst,start,
 	n_state = r_state;       
 	n_done = 1'b0;
 
-	t_push_fifo = 1'b0;
-
+	//t_push_fifo = 1'b0;
+	t_frag_done = 1'b0;
+	
 	t_add_srcA = r_w0;
 	t_add_srcB = r_l0_dy;
 	t_add_start = 1'b0;
@@ -299,15 +309,12 @@ module fragment_generator(clk,rst,start,
 	  begin
 	     n_w1 = w_adder_out;
 	     n_last_w1 = w_adder_out;
-	     $display("n_w1 = %x at cycle %d", n_w1, r_cycle);
-	     //$stop();
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
 	  begin
 	     n_w2 = w_adder_out;
 	     n_last_w2 = w_adder_out;
-	     $display("n_w2 = %x at cycle %d", n_w2, r_cycle);	     
-	     t_push_fifo = 1'b1;	     
+	     t_frag_done = 1'b1;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
 	  begin
@@ -376,7 +383,7 @@ module fragment_generator(clk,rst,start,
 	    end // case: IDLE
 	  INIT_FRAG:
 	    begin
-	       t_push_fifo = 1'b1;
+	       t_frag_done = 1'b1;
 	       if(r_x == r_xmax)
 		 begin
 		    n_state = INCR_Y_W0;
@@ -468,7 +475,7 @@ module fragment_generator(clk,rst,start,
 	       n_last_y = r_y;
 	       if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 		 begin
-		    t_push_fifo = 1'b1;
+		    t_frag_done = 1'b1;
 		    if(r_x == r_xmax)
 		      begin
 			 n_state = INCR_Y_W0;
@@ -484,6 +491,13 @@ module fragment_generator(clk,rst,start,
 	  DONE_DRAIN:
 	    begin
 	       if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
+		 begin
+		    n_state = ASSERT_DONE;
+		 end
+	    end
+	  ASSERT_DONE:
+	    begin
+	       if(w_fifo_empty)
 		 begin
 		    n_done = 1'b1;
 		    n_state = IDLE;
