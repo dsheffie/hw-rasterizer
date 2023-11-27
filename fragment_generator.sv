@@ -90,7 +90,7 @@ module fragment_generator(clk,rst,start,
    typedef enum logic [3:0] { INVALID=0, IDLE, INIT_FRAG, 
 			      GEN_W0, GEN_W1, GEN_W2,
 			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2,
-			      DELAY_0, DELAY_1} state_t;
+			      DELAY_0, DELAY_1, DONE_DRAIN} state_t;
    state_t r_state, n_state;
 
    assign done = r_done;
@@ -377,8 +377,16 @@ module fragment_generator(clk,rst,start,
 	  INIT_FRAG:
 	    begin
 	       t_push_fifo = 1'b1;
-	       n_state = GEN_W0;
-	       n_x = r_x + 'd1;
+	       if(r_x == r_xmax)
+		 begin
+		    n_state = INCR_Y_W0;
+		    n_y = r_y + 'd1;
+		 end
+	       else
+		 begin
+		    n_x = r_x + 'd1;
+		    n_state = GEN_W0;
+		 end
 	    end
 	  GEN_W0:
 	    begin
@@ -406,11 +414,9 @@ module fragment_generator(clk,rst,start,
 	       n_last_x = r_x;
 	       n_last_y = r_y;
 
-	       if(w_x == r_xmax && n_y == r_ymax)
+	       if(r_x == r_xmax && n_y == r_ymax)
                 begin
-                   n_done = 1'b1;
-                   n_state = IDLE;
-                   $finish();
+                   n_state = DONE_DRAIN;
                 end
 	       else if(r_x == r_xmax)
 		 begin
@@ -463,8 +469,24 @@ module fragment_generator(clk,rst,start,
 	       if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 		 begin
 		    t_push_fifo = 1'b1;
-		    n_state = GEN_W0;
-		    n_x = r_x + 'd1;
+		    if(r_x == r_xmax)
+		      begin
+			 n_state = INCR_Y_W0;
+			 n_y = r_y + 'd1;
+		      end
+		    else
+		      begin
+			 n_state = GEN_W0;
+			 n_x = r_x + 'd1;
+		      end
+		 end
+	    end // case: DELAY_1
+	  DONE_DRAIN:
+	    begin
+	       if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
+		 begin
+		    n_done = 1'b1;
+		    n_state = IDLE;
 		 end
 	    end
 	  default:
