@@ -137,6 +137,14 @@ module fragment_generator(clk,rst,start,
    wire 	 w_w1_not_negative = (r_frag.w1[30:0] == 'd0) || (r_frag.w1[31] == 1'b0);
    wire 	 w_w2_not_negative = (r_frag.w2[30:0] == 'd0) || (r_frag.w2[31] == 1'b0);
    wire 	 w_point_in_tri = w_w0_not_negative && w_w1_not_negative && w_w2_not_negative;
+
+   always_ff@(negedge clk)
+     begin
+	if(r_push_fifo && !w_point_in_tri)
+	  begin
+	     $display("x=%d, y=%d, w0=%b, w1=%b, w2=%b", r_frag.x, r_frag.y, r_frag.w0, r_frag.w1, r_frag.w2);
+	  end
+     end
    
    always_ff@(posedge clk)
      begin
@@ -223,7 +231,7 @@ module fragment_generator(clk,rst,start,
 	n_credits = r_credits;
 	
 	t_push_fifo = r_push_fifo ? w_point_in_tri : 1'b0;
-
+	
 	if(t_push_fifo && !pop_frag)
 	  begin
 	     n_credits = r_credits - 'd1;
@@ -331,21 +339,21 @@ module fragment_generator(clk,rst,start,
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
 	  begin
-	     $display("INCR_Y_W0 clobbers n_w0 at cycle %d, out %x, state = %d", r_cycle,  w_adder_out, r_state);	     
+	     //$display("INCR_Y_W0 clobbers n_w0 at cycle %d, out %x, state = %d", r_cycle,  w_adder_out, r_state);	     
 	     n_w0_00 = w_adder_out;
 	     n_w0 = w_adder_out;
 	     n_last_w0 =  w_adder_out;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W1)
 	  begin
-	     $display("INCR_Y_W1 clobbers n_w1 at cycle %d, out %x, state %d", r_cycle, w_adder_out, r_state);
+	     //$display("INCR_Y_W1 clobbers n_w1 at cycle %d, out %x, state %d", r_cycle, w_adder_out, r_state);
 	     n_w1_00 = w_adder_out;
 	     n_w1 = w_adder_out;
 	     n_last_w1 = w_adder_out;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 	  begin
-	     $display("INCR_Y_W2 clobbers n_w2 at cycle %d, out %x, state = %d", r_cycle, w_adder_out, r_state);
+	     //$display("INCR_Y_W2 clobbers n_w2 at cycle %d, out %x, state = %d", r_cycle, w_adder_out, r_state);
 	     n_w2_00 = w_adder_out;
 	     n_w2 = w_adder_out;
 	     n_last_w2 = w_adder_out;	     
