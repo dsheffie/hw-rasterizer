@@ -462,7 +462,9 @@ module fragment_generator(clk,rst,start,
 	       n_last_y = r_y;
 	       if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 		 begin
-		    n_state = INIT_FRAG;
+		    t_push_fifo = 1'b1;
+		    n_state = GEN_W0;
+		    n_x = r_x + 'd1;
 		 end
 	    end
 	  default:
