@@ -89,7 +89,8 @@ module fragment_generator(clk,rst,start,
       
    typedef enum logic [3:0] { INVALID=0, IDLE, INIT_FRAG, 
 			      GEN_W0, GEN_W1, GEN_W2,
-			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2} state_t;
+			      INCR_Y_W0, INCR_Y_W1, INCR_Y_W2,
+			      DELAY_0, DELAY_1} state_t;
    state_t r_state, n_state;
 
    assign done = r_done;
@@ -236,7 +237,8 @@ module fragment_generator(clk,rst,start,
 	//$display("state = %d", r_state);
 	if(t_push_fifo)
 	  begin
-	     $display("done with frag for x=%d, y=%d", r_last_x, r_last_y);
+	     $display("cycle %d : done with frag for x=%d, y=%d, t_frag.w1 = %x", 
+		      r_cycle, r_last_x, r_last_y, t_frag.w1);
 	  end
 	//$display("adder out %x", w_adder_out);
      end
@@ -309,21 +311,24 @@ module fragment_generator(clk,rst,start,
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
 	  begin
-	     $display("INCR_Y_W0 clobbers n_w0 at cycle %d", r_cycle);	     
+	     $display("INCR_Y_W0 clobbers n_w0 at cycle %d, out %x, state = %d", r_cycle,  w_adder_out, r_state);	     
 	     n_w0_00 = w_adder_out;
 	     n_w0 = w_adder_out;
+	     n_last_w0 =  w_adder_out;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W1)
 	  begin
-	     $display("INCR_Y_W1 clobbers n_w1 at cycle %d", r_cycle);
+	     $display("INCR_Y_W1 clobbers n_w1 at cycle %d, out %x, state %d", r_cycle, w_adder_out, r_state);
 	     n_w1_00 = w_adder_out;
 	     n_w1 = w_adder_out;
+	     n_last_w1 = w_adder_out;
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 	  begin
-	     $display("INCR_Y_W2 clobbers n_w2 at cycle %d", r_cycle);	     	     
+	     $display("INCR_Y_W2 clobbers n_w2 at cycle %d, out %x, state = %d", r_cycle, w_adder_out, r_state);
 	     n_w2_00 = w_adder_out;
 	     n_w2 = w_adder_out;
+	     n_last_w2 = w_adder_out;	     
 	  end
 
 
@@ -374,7 +379,6 @@ module fragment_generator(clk,rst,start,
 	       t_push_fifo = 1'b1;
 	       n_state = GEN_W0;
 	       n_x = r_x + 'd1;
-	       $display("r_x = %d, n_x = %d", r_x, n_x);
 	    end
 	  GEN_W0:
 	    begin
@@ -410,7 +414,7 @@ module fragment_generator(clk,rst,start,
                 end
 	       else if(r_x == r_xmax)
 		 begin
-		    n_state = INCR_Y_W0;
+		    n_state = DELAY_0;
 		    n_x = r_xmin;
 		    n_y = r_y + 'd1;
 		 end
@@ -421,6 +425,13 @@ module fragment_generator(clk,rst,start,
 		 end
 	       
 	    end // case: GEN_W2
+	  DELAY_0:
+	    begin
+	       if(r_last_states[`FP_ADD_LAT-1] == GEN_W2)
+		 begin
+		    n_state = INCR_Y_W0;
+		 end
+	    end
 	  INCR_Y_W0:
 	    begin
 	       t_add_srcA = r_w0_00;
@@ -443,7 +454,16 @@ module fragment_generator(clk,rst,start,
 	       t_add_srcB = r_l2_dx;
 	       t_add_start = 1'b1;
 	       t_add_sub = 1'b1;	       
-	       n_state = GEN_W0;
+	       n_state = DELAY_1;
+	    end
+	  DELAY_1:
+	    begin
+	       n_last_x = r_x;
+	       n_last_y = r_y;
+	       if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
+		 begin
+		    n_state = INIT_FRAG;
+		 end
 	    end
 	  default:
 	    begin
