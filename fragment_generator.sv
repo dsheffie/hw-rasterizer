@@ -236,7 +236,7 @@ module fragment_generator(clk,rst,start,
 	//$display("state = %d", r_state);
 	if(t_push_fifo)
 	  begin
-	     $display("start x=%d, y=%d", r_x, r_y);
+	     $display("done with frag for x=%d, y=%d", r_last_x, r_last_y);
 	  end
 	//$display("adder out %x", w_adder_out);
      end
@@ -309,6 +309,7 @@ module fragment_generator(clk,rst,start,
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W0)
 	  begin
+	     $display("INCR_Y_W0 clobbers n_w0 at cycle %d", r_cycle);	     
 	     n_w0_00 = w_adder_out;
 	     n_w0 = w_adder_out;
 	  end
@@ -320,6 +321,7 @@ module fragment_generator(clk,rst,start,
 	  end
 	else if(r_last_states[`FP_ADD_LAT-1] == INCR_Y_W2)
 	  begin
+	     $display("INCR_Y_W2 clobbers n_w2 at cycle %d", r_cycle);	     	     
 	     n_w2_00 = w_adder_out;
 	     n_w2 = w_adder_out;
 	  end
@@ -342,7 +344,7 @@ module fragment_generator(clk,rst,start,
 		    n_ymin = ymin;
 		    n_ymax = ymax;
 		    n_xmin = xmin;
-		    n_xmax = ymax;
+		    n_xmax = xmax;
 		    n_l0_dx = l0_dx;
 		    n_l1_dx = l1_dx;
 		    n_l2_dx = l2_dx;
@@ -370,7 +372,9 @@ module fragment_generator(clk,rst,start,
 	  INIT_FRAG:
 	    begin
 	       t_push_fifo = 1'b1;
-	       n_state = GEN_W0;	       
+	       n_state = GEN_W0;
+	       n_x = r_x + 'd1;
+	       $display("r_x = %d, n_x = %d", r_x, n_x);
 	    end
 	  GEN_W0:
 	    begin
@@ -394,14 +398,17 @@ module fragment_generator(clk,rst,start,
 	       t_add_srcA = n_w2;
 	       t_add_srcB = r_l2_dy;
 	       t_add_start = 1'b1;
-	       
+
+	       n_last_x = r_x;
+	       n_last_y = r_y;
+
 	       if(w_x == r_xmax && n_y == r_ymax)
                 begin
                    n_done = 1'b1;
                    n_state = IDLE;
                    $finish();
                 end
-	       else if(w_x == r_xmax)
+	       else if(r_x == r_xmax)
 		 begin
 		    n_state = INCR_Y_W0;
 		    n_x = r_xmin;
