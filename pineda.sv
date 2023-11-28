@@ -394,7 +394,8 @@ module pineda(clk,rst,start,
 	t_frag.w2 = n_last_w2;
 	t_frag.x = n_last_x;
 	t_frag.y = n_last_y;
-
+	t_frag.z = 32'd0;
+	
 	
 	case(r_state)
 	  IDLE:
