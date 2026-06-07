@@ -39,6 +39,7 @@ static int32_t cross(const vertex2d &a, const vertex2d &b, const vertex2d &p) {
 static int w_int[3] = {0};
 static int w_p = 0;
 
+extern "C" {
 int crossp(int x0, int y0,
 	   int x1, int y1,
 	   int x2, int y2) {
@@ -50,7 +51,7 @@ int crossp(int x0, int y0,
   w_int[w_p++] = x;
   return x;
 }
-
+}
   // for(int32_t y = y_min; y <= y_max; y++) {
         
   //   int y_pv2 = y_pv2_;

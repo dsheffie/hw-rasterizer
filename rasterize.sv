@@ -355,7 +355,7 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
 			 
 		      end // else: !if(r_x == r_x_max)
 		    
-		    if(r_y == w_y_max)
+		    if((r_y == w_y_max) & (r_x == r_x_max))
 		      begin
 			 n_state = DRAIN;
 		      end
