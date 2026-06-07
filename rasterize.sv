@@ -9,21 +9,12 @@ typedef struct packed {
 } triangle_t;
 
 
-import "DPI-C" function int crossp(input int x0, 
-				   input int y0, 
-				   input int x1, 
-				   input int y1,
-				   input int x2, 
-				   input int y2);
-
-// import "DPI-C" function void check_frag(input int x, 
-// 					input int y,
-// 					input int w0,
-// 					input int w1,
-// 					input int w2);
-
-
-module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim, 
+module rasterize(clk, rst, go, 
+		 v0_x, v0_y, 
+		 v1_x, v1_y, 
+		 v2_x, v2_y,
+		 w0,w1,w2,
+		 x_dim, y_dim, 
 		 pop_frag, addr_q, pixel_q, valid_q, done) ;
    input logic clk;
    input logic rst;
@@ -34,8 +25,13 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
    input logic [31:0] v1_y;
    input logic [31:0] v2_x;
    input logic [31:0] v2_y;
+   input logic [31:0] w0;
+   input logic [31:0] w1;
+   input logic [31:0] w2;   
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
+
+   
    input logic 	      pop_frag;
    
    output logic [31:0] addr_q;
@@ -175,20 +171,20 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
 	t_w1 = 'd0;
 	t_w2 = 'd0;
 	
-	if(r_state == COMPUTE_START_CROSS_V0V1_X)
-	  begin
-	     t_w0  = crossp(r_tri.v0_x, r_tri.v0_y, 
-			    r_tri.v1_x, r_tri.v1_y,
-			    r_x_min, r_y_min);
+	// if(r_state == COMPUTE_START_CROSS_V0V1_X)
+	//   begin
+	//      t_w0  = crossp(r_tri.v0_x, r_tri.v0_y, 
+	// 		    r_tri.v1_x, r_tri.v1_y,
+	// 		    r_x_min, r_y_min);
 	     
-	     t_w1  = crossp(r_tri.v2_x, r_tri.v2_y, 
-			    r_tri.v0_x, r_tri.v0_y,
-			    r_x_min, r_y_min);
+	//      t_w1  = crossp(r_tri.v2_x, r_tri.v2_y, 
+	// 		    r_tri.v0_x, r_tri.v0_y,
+	// 		    r_x_min, r_y_min);
 	     
-	     t_w2  = crossp(r_tri.v1_x, r_tri.v1_y, 
-			    r_tri.v2_x, r_tri.v2_y,
-			    r_x_min, r_y_min);
-	  end
+	//      t_w2  = crossp(r_tri.v1_x, r_tri.v1_y, 
+	// 		    r_tri.v2_x, r_tri.v2_y,
+	// 		    r_x_min, r_y_min);
+	//   end
 
 	
      end // always_comb
@@ -241,6 +237,13 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
 		    n_state = COMPUTE_BB;
 		    t_save_tri = 1'b1;
 		    n_x_dim = x_dim;
+		    //weird ordering is correct
+		    n_w0 = w2;
+		    n_w0_y = w2;
+		    n_w1 = w1;
+		    n_w1_y = w1;
+		    n_w2 = w0;
+		    n_w2_y = w0;	 
 		 end
 	    end
 	  COMPUTE_BB:
@@ -298,13 +301,6 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
 	    begin
 	       n_addr = r_start_addr;
 	       n_state = RENDER;
-	       //weird ordering is correct
-	       n_w0 = t_w2;
-	       n_w0_y = t_w2;
-	       n_w1 = t_w1;
-	       n_w1_y = t_w1;
-	       n_w2 = t_w0;
-	       n_w2_y = t_w0;	 
 	    end
 	  RENDER:
 	    begin
@@ -423,7 +419,6 @@ module rasterize(clk, rst, go, v0_x, v0_y, v1_x, v1_y, v2_x, v2_y, x_dim, y_dim,
 	r_w0_y <= rst ? 'd0 : n_w0_y;
 	r_w1_y <= rst ? 'd0 : n_w1_y;
 	r_w2_y <= rst ? 'd0 : n_w2_y;		
-	
      end // always_ff@ (posedge clk)
    
 endmodule // rasterize

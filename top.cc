@@ -40,43 +40,18 @@ static int w_int[3] = {0};
 static int w_p = 0;
 
 extern "C" {
-int crossp(int x0, int y0,
-	   int x1, int y1,
-	   int x2, int y2) {
-  vertex2d v0(x0, y0);
-  vertex2d v1(x1, y1);
-  vertex2d v2(x2, y2);
-  int x = cross(v0, v1, v2);
-  std::cout << w_p << "," << x << "\n";
-  w_int[w_p++] = x;
-  return x;
+  int crossp(int x0, int y0,
+	     int x1, int y1,
+	     int x2, int y2) {
+    vertex2d v0(x0, y0);
+    vertex2d v1(x1, y1);
+    vertex2d v2(x2, y2);
+    int x = cross(v0, v1, v2);
+    std::cout << w_p << "," << x << "\n";
+    w_int[w_p++] = x;
+    return x;
+  }
 }
-}
-  // for(int32_t y = y_min; y <= y_max; y++) {
-        
-  //   int y_pv2 = y_pv2_;
-  //   int y_pv1 = y_pv1_;
-  //   int y_pv0 = y_pv0_;
-    
-  //   for(int32_t x = x_min; x <= x_max; x++) {
-  //     int32_t w0 = y_pv2 + b0;
-  //     int32_t w1 = y_pv1 + b1;
-  //     int32_t w2 = y_pv0 + b2;
-  //     printf("%d %d %d %d %d\n", x, y, w0, w1, w2);
-  //     if(w0 >= 0 and w1 >= 0 and w2 >= 0) {
-  // 	pxls[y * imageWidth + x] = c;
-  // 	n_pxls++;
-  //     }
-      
-  //     y_pv2 -= v2v1.y;
-  //     y_pv1 -= v0v2.y;
-  //     y_pv0 -= v1v0.y;      
-  //   }
-  //   //printf("incr y, step -%d, old %d\n", v1v0.x, y_pv0_);
-  //   y_pv2_ += v2v1.x;
-  //   y_pv1_ += v0v2.x;
-  //   y_pv0_ += v1v0.x;
-  // }
 
 static int n_pix = 0;
 
@@ -121,6 +96,26 @@ int main(int argc, char *argv[]) {
   
   tb->v2_x = 50;
   tb->v2_y = 100;
+
+
+  tb->w0 = crossp(tb->v0_x, tb->v0_y,
+		  tb->v1_x, tb->v1_y,
+		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
+		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)		  
+		  );
+
+  tb->w1 = crossp(tb->v2_x, tb->v2_y,
+		  tb->v0_x, tb->v0_y,
+		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
+		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)		  
+		  );
+
+  tb->w2 = crossp(tb->v1_x, tb->v1_y,
+		  tb->v2_x, tb->v2_y,
+		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
+		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)
+		  );
+  
   
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
