@@ -1,6 +1,6 @@
 UNAME_S = $(shell uname -s)
 
-OBJ = top.o setup.o verilated.o
+OBJ = top.o setup.o obj.o pipeline.o verilated.o
 
 SV_SRC = rasterize.sv
 

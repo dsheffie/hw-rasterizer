@@ -4,6 +4,8 @@
 #include <fstream>
 #include "Vrasterize.h"
 #include "setup.h"
+#include "obj.h"
+#include "pipeline.h"
 
 const int32_t imageWidth = 512;
 const int32_t imageHeight = 512;
@@ -45,9 +47,10 @@ static void render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
     }
     if(tb->valid_q) {
       int32_t z = (int32_t)tb->pixel_q;             // already true (fixed-point) depth
-      int32_t addr = tb->addr_q;
-      if(z < zbuf[addr]) {                          // depth test: nearest wins
-	zbuf[addr] = z;
+      uint32_t addr = tb->addr_q;
+      // guard: off-screen vertices can produce out-of-range addresses
+      if(addr < (uint32_t)(imageWidth*imageHeight) && z < zbuf[addr]) {
+	zbuf[addr] = z;                             // depth test: nearest wins
 	fb[addr][0] = r;
 	fb[addr][1] = g;
 	fb[addr][2] = b;
@@ -62,6 +65,9 @@ static void render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
 int main(int argc, char *argv[]) {
   const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
   contextp->commandArgs(argc, argv);
+
+  const char *model_path = "bigguy.obj";
+  if(argc > 1 && argv[1][0] != '+' && argv[1][0] != '-') model_path = argv[1];
 
   Vrasterize *tb = new Vrasterize;
   tb->clk = 0;
@@ -83,14 +89,20 @@ int main(int argc, char *argv[]) {
   int32_t *zbuf = new int32_t[w * h];
   for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
 
-  // Two triangles sharing the same screen footprint but with opposite
-  // depth gradients, so their planes intersect: red is nearer along the
-  // v0-v1 edge, green is nearer at v2.  Red is drawn first, so a correct
-  // depth buffer yields a red/green seam (not an all-green paint-over).
-  render_triangle(tb, framebuffer, zbuf,
-		  {60,60,10}, {260,100,10}, {100,260,60}, 255,   0, 0);
-  render_triangle(tb, framebuffer, zbuf,
-		  {60,60,60}, {260,100,60}, {100,260,10},   0, 255, 0);
+  // 3D software pipeline: load the model and project it to screen-space
+  // triangles, then rasterize each through the RTL + software depth buffer.
+  std::vector<model_tri> mesh = load_obj(model_path);
+  if(mesh.empty()) {
+    std::cerr << "failed to load model: " << model_path << "\n";
+    return 1;
+  }
+  std::vector<screen_tri> tris = project_mesh(mesh, w, h);
+  std::cout << "model " << model_path << ": " << mesh.size()
+	    << " triangles, " << tris.size() << " after pipeline\n";
+
+  for(const screen_tri &t : tris) {
+    render_triangle(tb, framebuffer, zbuf, t.v[0], t.v[1], t.v[2], t.r, t.g, t.b);
+  }
 
   std::cout << "all done, trying to write image\n";
   std::ofstream ofs;
