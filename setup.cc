@@ -26,10 +26,22 @@ tri_setup setup_triangle(const vertex3d &v0, const vertex3d &v1, const vertex3d 
   s.w1 = cross({v2.x, v2.y}, {v0.x, v0.y}, p);
   s.w2 = cross({v1.x, v1.y}, {v2.x, v2.y}, p);
 
-  // depth plane equation: z*area = dzdx*x + dzdy*y + c, stepped by the RTL
-  s.area    = v0.x*(v1.y-v2.y) - v0.y*(v1.x-v2.x) + (v1.x*v2.y - v2.x*v1.y);
-  s.dzdx    = v0.z*(v1.y-v2.y) - v0.y*(v1.z-v2.z) + (v1.z*v2.y - v2.z*v1.y);
-  s.dzdy    = v0.x*(v1.z-v2.z) - v0.z*(v1.x-v2.x) + (v1.x*v2.z - v2.x*v1.z);
-  s.z_start = v0.z*s.area + s.dzdx*(xs-v0.x) + s.dzdy*(ys-v0.y);
+  // depth plane through the three (x,y,z) vertices, solved by Cramer's rule:
+  //   area     = 2 * signed triangle area (the shared determinant)
+  //   dz*_num  = numerators of dz/dx and dz/dy
+  int64_t area     = (int64_t)v0.x*(v1.y-v2.y) - (int64_t)v0.y*(v1.x-v2.x) + ((int64_t)v1.x*v2.y - (int64_t)v2.x*v1.y);
+  int64_t dzdx_num = (int64_t)v0.z*(v1.y-v2.y) - (int64_t)v0.y*(v1.z-v2.z) + ((int64_t)v1.z*v2.y - (int64_t)v2.z*v1.y);
+  int64_t dzdy_num = (int64_t)v0.x*(v1.z-v2.z) - (int64_t)v0.z*(v1.x-v2.x) + ((int64_t)v1.x*v2.z - (int64_t)v2.x*v1.z);
+
+  // Normalize once per triangle into Q.DEPTH_FRAC_BITS fixed point, so the
+  // RTL stepper carries true depth: bounded width and comparable across
+  // triangles (no per-fragment divide).
+  s.dzdx = (dzdx_num << DEPTH_FRAC_BITS) / area;
+  s.dzdy = (dzdy_num << DEPTH_FRAC_BITS) / area;
+
+  // depth at the start corner; +0.5 LSB so the RTL's fraction truncation
+  // behaves as round-to-nearest.
+  int64_t z0_fx = (int64_t)v0.z << DEPTH_FRAC_BITS;
+  s.z_start = z0_fx + s.dzdx*(xs-v0.x) + s.dzdy*(ys-v0.y) + (1 << (DEPTH_FRAC_BITS-1));
   return s;
 }

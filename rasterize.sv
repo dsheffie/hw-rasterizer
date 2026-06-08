@@ -21,6 +21,12 @@ module rasterize(clk, rst, go,
 		 pixel_q, 
 		 valid_q, 
 		 done) ;
+   // Depth interpolation fixed-point format: DEPTH_INT_BITS.DEPTH_FRAC_BITS
+   // (signed).  Must match DEPTH_FRAC_BITS in setup.h.
+   localparam DEPTH_FRAC_BITS = 12;
+   localparam DEPTH_INT_BITS  = 25;
+   localparam DEPTH_W         = DEPTH_INT_BITS + DEPTH_FRAC_BITS;
+
    input logic clk;
    input logic rst;
    input logic go;
@@ -36,9 +42,9 @@ module rasterize(clk, rst, go,
    input logic [31:0] w0;
    input logic [31:0] w1;
    input logic [31:0] w2;
-   input logic [31:0] dzdx;
-   input logic [31:0] dzdy;
-   input logic [31:0] z_start;
+   input logic [DEPTH_W-1:0] dzdx;
+   input logic [DEPTH_W-1:0] dzdy;
+   input logic [DEPTH_W-1:0] z_start;
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
@@ -113,8 +119,8 @@ module rasterize(clk, rst, go,
    logic [31:0] r_w1_y, n_w1_y;
    logic [31:0] r_w2_y, n_w2_y;
 
-   logic [31:0] r_z, n_z;
-   logic [31:0] r_z_y, n_z_y;
+   logic [DEPTH_W-1:0] r_z, n_z;
+   logic [DEPTH_W-1:0] r_z_y, n_z_y;
    
    logic [31:0] t_mul_a, t_mul_b;
    logic [31:0] t_sub_a0, t_sub_b0;
@@ -168,7 +174,7 @@ module rasterize(clk, rst, go,
 	if(t_push_frag)
 	  begin
              r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_addr;
-	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z;
+	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);
 	  end
      end
 

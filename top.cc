@@ -44,7 +44,7 @@ static void render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
       done = true;
     }
     if(tb->valid_q) {
-      int32_t z = (int32_t)tb->pixel_q / s.area;   // recover interpolated depth
+      int32_t z = (int32_t)tb->pixel_q;             // already true (fixed-point) depth
       int32_t addr = tb->addr_q;
       if(z < zbuf[addr]) {                          // depth test: nearest wins
 	zbuf[addr] = z;
