@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Depth in the hardware rasterizer</title>
+<title>The hardware rasterizer: from OBJ to pixels</title>
 <style>
   :root { --fg:#1b1b1b; --muted:#666; --accent:#0a5; --rule:#ddd; --code-bg:#f5f5f5; }
   body { font: 16px/1.6 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
@@ -26,64 +26,115 @@
           padding: 0.7rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; }
   .file { color: var(--muted); font-size: 0.85em; }
   ul { padding-left: 1.3rem; }
+  .stage { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em;
+           white-space: pre; line-height: 1.35; }
 </style>
 </head>
 <body>
 
-<h1>Depth in the hardware rasterizer</h1>
-<p class="sub">How per-fragment depth is set up on the host and interpolated in the RTL.</p>
+<h1>The hardware rasterizer: from OBJ to pixels</h1>
+<p class="sub">End-to-end pipeline: a 3D model on disk becomes a shaded, depth-buffered image.</p>
 
-<p>This rasterizer follows the <strong>SGI CRIME</strong> model (CRIME 1.5 spec, &sect;7.3.5&ndash;7.3.7):
-the host computes the triangle's <em>plane&nbsp;equation</em>, and the hardware contains only
-<em>steppers</em> &mdash; adder/subtractors that walk the value across the bounding box one pixel at a
-time. Nothing is divided or multiplied per pixel; the host hands the RTL a starting value plus
-per-step increments, and the RTL reaches every pixel with adds and subtracts.</p>
+<p>This project follows the <strong>SGI CRIME</strong> model (CRIME 1.5 spec, &sect;7.3.5&ndash;7.3.7):
+the hardware (RTL) accelerates <em>only 2D screen-space rasterization</em>; everything before that
+&mdash; transforms, projection, culling, lighting, plane-equation setup &mdash; is done on the host.
+So rendering a 3D model is really a host-side software front-end feeding screen-space triangles to a
+small, fast rasterizer.</p>
 
-<p>The same machinery does two independent jobs: <strong>coverage</strong> (is this pixel inside the
-triangle?) via three edge functions, and <strong>depth</strong> (what is <code>z</code> here?) via the
-depth plane equation. The host side of both lives in <code class="file">setup.cc</code>; the stepping
-lives in <code class="file">rasterize.sv</code>.</p>
+<h2>Architecture at a glance</h2>
+<p class="stage">
+  bigguy.obj
+     &darr;  <b>obj.cc</b>        load + triangulate          &rarr;  model-space triangles
+     &darr;  <b>pipeline.cc</b>   transform / project / cull / shade  &rarr;  screen-space triangles (x,y,z) + color
+     &darr;  <b>setup.cc</b>      edge functions + depth plane (fixed-point)  &rarr;  RTL inputs
+     &darr;  <b>rasterize.sv</b>  step coverage + depth across the bounding box  &rarr;  fragments (addr, depth)
+     &darr;  <b>top.cc</b>        software depth test + framebuffer  &rarr;  raster2d.ppm
+</p>
+<table>
+  <tr><th>File</th><th>Role</th></tr>
+  <tr><td><code>obj.cc</code></td><td>Wavefront OBJ loader (positions + faces)</td></tr>
+  <tr><td><code>pipeline.cc</code></td><td>3D geometry: model/view/projection, culling, flat shading</td></tr>
+  <tr><td><code>setup.cc</code></td><td>per-triangle rasterizer setup (host side of the algorithm)</td></tr>
+  <tr><td><code>rasterize.sv</code></td><td>the RTL: 2D edge + depth steppers</td></tr>
+  <tr><td><code>top.cc</code></td><td>RTL test harness + software depth buffer + image output</td></tr>
+</table>
 
-<h2>The host side: <code>setup_triangle()</code></h2>
+<h2>1. Loading the model</h2>
+<p class="file">obj.cc</p>
+<p>A minimal Wavefront OBJ reader: <code>v</code> lines give vertex positions, <code>f</code> lines give
+faces. Only the vertex index of each <code>f</code> token is used (the <code>v/vt/vn</code> texture and
+normal indices are ignored &mdash; normals are computed from geometry later). Polygons are
+<strong>fan-triangulated</strong> (an <var>n</var>-gon becomes <var>n</var>&minus;2 triangles), so the
+quad meshes here come out as triangles. The result is a list of model-space triangles.</p>
+
+<h2>2. The 3D software pipeline</h2>
+<p class="file">pipeline.cc</p>
+<p><code>project_mesh()</code> turns model-space triangles into the screen-space triangles the rasterizer
+consumes. The transform math is done in <strong>float</strong>; only the final pixel coordinates and
+depth are quantized to integers, keeping the RTL integer-only.</p>
+
+<h3>Auto-fit, then model / view / projection</h3>
+<p>The model is centered on its bounding-box centroid and uniformly scaled to roughly
+<code>[-1,1]</code>, so any model lands in view regardless of its native units:</p>
+<pre><code>model = rotateY(35&deg;) * scale(2/extent) * translate(-center);
+MV    = translate(0,0,-4) * model;          // camera 4 units back, looking -z
+P     = perspective(fovy=50&deg;, aspect, near=0.1, far=100);</code></pre>
+
+<h3>Reject, project, viewport</h3>
+<p>For each triangle, vertices go to eye space via <code>MV</code>. Triangles touching the near plane are
+<strong>rejected</strong> (first-cut clipping; keeps the perspective divide well-behaved). Survivors are
+projected and divided by <code>w</code> to NDC, then mapped to the screen and to a quantized depth:</p>
+<pre><code>if (eye.z &gt; -near) reject;                  // at/behind the near plane
+
+ndc   = clip.xyz / clip.w;                   // perspective divide
+sx    = (ndc.x*0.5 + 0.5) * width;
+sy    = (0.5 - ndc.y*0.5) * height;          // flip y: screen origin is upper-left
+depth = (ndc.z*0.5 + 0.5) * 65535;           // window depth, 16-bit</code></pre>
+
+<div class="note"><strong>Why this works with affine depth.</strong> The rasterizer interpolates depth
+<em>linearly in screen space</em>. That is exactly correct for projected geometry: window depth is a
+plane in screen space. (Perspective non-linearity only affects <em>attributes</em> like color/texture,
+which aren't interpolated here.) So the entire 3D upgrade is new host code &mdash; the rasterizer and the
+depth path are unchanged.</div>
+
+<h3>Winding fixup and flat shading</h3>
+<p>The RTL's coverage test assumes one winding (all edge weights &ge; 0, i.e. positive screen area). After
+projection a front-facing triangle may come out either way, so each triangle's screen area is checked and
+its last two vertices swapped if needed (degenerate, zero-area triangles are dropped). Visibility is left
+to the depth buffer &mdash; back faces still rasterize but lose the depth test &mdash; so no explicit
+backface cull is needed in this first cut.</p>
+<p>Shading is flat per triangle from the eye-space face normal and a directional light, made two-sided so
+the camera-facing surface is always lit:</p>
+<pre><code>N  = cross(e1-e0, e2-e0);  if (N faces away) N = -N;   // two-sided
+k  = ambient + (1-ambient) * max(0, dot(normalize(N), L));
+rgb = base * k;</code></pre>
+
+<h2>3. Per-triangle setup</h2>
 <p class="file">setup.cc</p>
-<p><code>setup_triangle()</code> takes three <code>(x,y,z)</code> vertices and returns the values the RTL
-needs <em>at the pixel where it starts scanning</em>.</p>
+<p>Given one screen-space triangle, <code>setup_triangle()</code> computes the values the RTL needs
+<em>at the pixel where it starts scanning</em> (the upper-left corner of the bounding box), so the
+hardware only has to add and subtract from there. It does two independent jobs: coverage and depth.</p>
 
-<h3>1. The start corner</h3>
-<pre><code>int32_t xs = std::min(std::min(v0.x, v1.x), v2.x);
-int32_t ys = std::min(std::min(v0.y, v1.y), v2.y);</code></pre>
-<p><code>(xs, ys)</code> is the upper-left corner of the triangle's bounding box &mdash; exactly where the
-RTL begins (<code>COMPUTE_BB</code> sets <code>r_x = x_min</code>, <code>r_y = y_min</code>). Every initial
-value below is therefore computed at the precise pixel the hardware steps away from.</p>
-
-<h3>2. Edge functions (coverage)</h3>
-<pre><code>// (b-a) x (p-b)  -- the edge function for directed edge a->b at point p
-int32_t cross(const vertex2d &a, const vertex2d &b, const vertex2d &p);
-
+<h3>Edge functions (coverage)</h3>
+<pre><code>// (b-a) x (p-b): the edge function for directed edge a->b at point p
 s.w0 = cross(v0, v1, p);   // edge v0 -> v1
 s.w1 = cross(v2, v0, p);   // edge v2 -> v0
 s.w2 = cross(v1, v2, p);   // edge v1 -> v2</code></pre>
-<p>Each edge function is a signed quantity: zero on the edge's line, positive on one side, negative on
-the other. A pixel is inside the triangle when all three share a sign &mdash; in this design, all
-&ge;&nbsp;0. The RTL's coverage test is exactly <code>(r_w0[31] | r_w1[31] | r_w2[31]) == 0</code> (no
-sign bit set). <code>setup.cc</code> computes only the <em>starting</em> weights; the RTL steps each
-one by that edge's <code>dx</code>/<code>dy</code> (derived on-chip from the vertices) as it scans.</p>
-<div class="note">The edge ordering (v0&rarr;v1, v2&rarr;v0, v1&rarr;v2) is a contract with the RTL: it
-must match how the hardware pairs each weight with its edge deltas. Change the stepper wiring and these
-three lines have to change with it.</div>
+<p>Each is zero on the edge's line, positive on one side. A pixel is inside when all three are
+&ge;&nbsp;0; the RTL's test is <code>(r_w0[31] | r_w1[31] | r_w2[31]) == 0</code>. Setup computes the
+starting weights; the RTL steps them.</p>
 
-<h3>3. The depth plane</h3>
-<p>The plane <code>z(x,y) = A&middot;x + B&middot;y + C</code> through the three <code>(x,y,z)</code>
-vertices is solved by Cramer's rule. The shared denominator is twice the signed triangle area; the
-gradient numerators are the determinants with the z-column swapped in:</p>
+<h3>The depth plane</h3>
+<p>The plane <code>z(x,y) = A&middot;x + B&middot;y + C</code> through the three vertices is solved by
+Cramer's rule; <code>area</code> is twice the signed triangle area, the numerators are the gradients
+scaled by <code>area</code>:</p>
 <pre><code>int64_t area     = x0*(y1-y2) - y0*(x1-x2) + (x1*y2 - x2*y1);  // 2 * signed area
 int64_t dzdx_num = z0*(y1-y2) - y0*(z1-z2) + (z1*y2 - z2*y1);  // = area * dz/dx
 int64_t dzdy_num = x0*(z1-z2) - z0*(x1-x2) + (x1*z2 - x2*z1);  // = area * dz/dy</code></pre>
 
-<h3>4. Normalize once, into fixed-point</h3>
-<p>The real gradients <code>dz/dx</code>, <code>dz/dy</code> are fractional (e.g. 0.8), so plain
-integers would round them to 0 and depth would be flat. Instead we divide by <code>area</code>
-<strong>once per triangle</strong> and keep the result in signed fixed-point with
+<h3>Normalize once, into fixed-point</h3>
+<p>The real gradients are fractional, so plain integers would round them to 0. Instead we divide by
+<code>area</code> <strong>once per triangle</strong> into signed fixed-point with
 <code>DEPTH_FRAC_BITS</code> fraction bits:</p>
 <pre><code>s.dzdx = (dzdx_num &lt;&lt; DEPTH_FRAC_BITS) / area;   // true dz/dx, Q.DEPTH_FRAC_BITS
 s.dzdy = (dzdy_num &lt;&lt; DEPTH_FRAC_BITS) / area;
@@ -91,27 +142,25 @@ s.dzdy = (dzdy_num &lt;&lt; DEPTH_FRAC_BITS) / area;
 int64_t z0_fx = (int64_t)v0.z &lt;&lt; DEPTH_FRAC_BITS;
 s.z_start = z0_fx + s.dzdx*(xs-v0.x) + s.dzdy*(ys-v0.y)
           + (1 &lt;&lt; (DEPTH_FRAC_BITS-1));            // +0.5 LSB: round, not truncate</code></pre>
-<p><code>z_start</code> is the depth at the start corner (CRIME EQ&nbsp;10, scaled), and the half-LSB makes
-the RTL's later fraction truncation behave as round-to-nearest.</p>
 
 <h2>The fixed-point format</h2>
-<p>The format is a single source of truth, declared as named constants on both sides of the
-hardware/software boundary &mdash; they <strong>must match</strong>.</p>
+<p>Declared as named constants on both sides of the hardware/software boundary &mdash; they
+<strong>must match</strong>.</p>
 <table>
   <tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
   <tr><td><code>DEPTH_FRAC_BITS</code></td><td>12</td><td>fraction bits carried by the stepper</td></tr>
-  <tr><td><code>DEPTH_INT_BITS</code></td><td>25</td><td>integer bits (24-bit depth + sign headroom)</td></tr>
+  <tr><td><code>DEPTH_INT_BITS</code></td><td>25</td><td>integer bits</td></tr>
   <tr><td><code>DEPTH_W</code></td><td>37</td><td>total stepper width = 25.12, CRIME's depth format</td></tr>
 </table>
 <p class="file">DEPTH_FRAC_BITS is defined in both setup.h (host) and rasterize.sv (RTL).</p>
-<div class="note">Why this matters: a fixed width is independent of triangle/screen size (the older
-<code>z&middot;area</code> scheme grew without bound), and because every triangle's depth is normalized
-to the <em>same</em> units, depth values are directly comparable across triangles &mdash; a hardware
-depth test would be a plain <code>&lt;</code> comparator with no per-fragment divide.</div>
+<div class="note">Normalizing once per triangle gives a <em>fixed</em> stepper width (independent of
+triangle/screen size) and depths that are directly comparable across triangles &mdash; so the depth
+test is a plain <code>&lt;</code> comparison with no per-fragment divide.</div>
 
-<h2>The hardware side: the depth stepper</h2>
+<h2>4. The hardware: coverage + depth steppers</h2>
 <p class="file">rasterize.sv</p>
-<p>The RTL loads <code>z_start</code> and steps it &mdash; nothing more:</p>
+<p>The RTL walks the triangle's bounding box one pixel at a time. At each pixel it holds the three edge
+weights and the depth; moving in +x or wrapping to the next row is just an add/subtract:</p>
 <pre><code>// load at the start corner
 n_z = z_start;  n_z_y = z_start;
 
@@ -121,36 +170,46 @@ n_z = r_z + dzdx;
 // wrap to the next row (x resets, y advances)
 n_z = r_z_y + dzdy;  n_z_y = r_z_y + dzdy;
 
-// emit the fragment depth: drop the fraction bits (truncate to integer)
+// a fragment is emitted only where all three edge weights are >= 0;
+// its depth drops the fraction bits (truncate to integer)
 r_pixelq[...] &lt;= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);</code></pre>
-<p><code>r_z</code> tracks the current pixel's depth; <code>r_z_y</code> latches the row's starting depth so
-each new row resumes from the correct value. Because the depth is already normalized, the emitted
-<code>pixel_q</code> is true depth &mdash; no further scaling needed downstream.</p>
+<p>Because depth is already normalized, <code>pixel_q</code> is true depth &mdash; no scaling downstream.</p>
+
+<h2>5. The software depth buffer</h2>
+<p class="file">top.cc</p>
+<p>The harness drives one triangle at a time (the state machine returns to IDLE between triangles), drains
+the emitted fragments, and keeps a per-pixel nearest depth. A fragment's color is written only if it
+passes the depth test; an address guard protects against any off-screen fragment:</p>
+<pre><code>if (addr &lt; width*height &amp;&amp; pixel_q &lt; zbuf[addr]) {   // LESS: nearest wins
+  zbuf[addr] = pixel_q;
+  framebuffer[addr] = color;
+}</code></pre>
+<p>Because depths are comparable across triangles, overlapping geometry resolves correctly &mdash; the
+nearest surface at each pixel wins, which for a closed model is its front face.</p>
 
 <h2>End-to-end data flow</h2>
 <table>
-  <tr><th>setup.cc produces</th><th>rasterize.sv does</th><th>top.cc does</th></tr>
-  <tr><td><code>w0,w1,w2</code> (at start corner)</td><td>steps each by edge dx/dy; sign test = coverage</td><td>&mdash;</td></tr>
-  <tr><td><code>z_start</code> (Q.12 depth at start)</td><td>loads into <code>r_z</code></td><td>&mdash;</td></tr>
-  <tr><td><code>dzdx</code></td><td><code>r_z += dzdx</code> on +x</td><td>&mdash;</td></tr>
-  <tr><td><code>dzdy</code></td><td><code>r_z = r_z_y + dzdy</code> on row wrap</td><td>&mdash;</td></tr>
-  <tr><td>&mdash;</td><td>emits <code>pixel_q = r_z &gt;&gt; 12</code> (true depth)</td><td>depth test: <code>if (pixel_q &lt; zbuf[addr])</code></td></tr>
+  <tr><th>Stage</th><th>Produces</th></tr>
+  <tr><td>obj.cc</td><td>model-space triangles</td></tr>
+  <tr><td>pipeline.cc</td><td>screen-space triangles: pixel <code>(x,y)</code>, 16-bit depth, flat color</td></tr>
+  <tr><td>setup.cc</td><td><code>w0,w1,w2</code> (coverage) and <code>dzdx,dzdy,z_start</code> (Q.12 depth)</td></tr>
+  <tr><td>rasterize.sv</td><td>fragments: <code>addr</code> + true depth <code>pixel_q</code></td></tr>
+  <tr><td>top.cc</td><td>depth-tested pixels &rarr; <code>raster2d.ppm</code></td></tr>
 </table>
-<p>The software z-buffer in <code>top.cc</code> keeps a per-pixel nearest depth and writes a fragment's
-color only if it passes the test. Because depths are comparable across triangles, two triangles whose
-planes intersect produce a clean depth seam &mdash; the regression scene draws exactly that.</p>
 
-<h2>The trade-off</h2>
+<h2>Design notes &amp; first-cut scope</h2>
 <ul>
-  <li><strong>Gained:</strong> bounded register width; one divide per triangle instead of per fragment;
-      cross-triangle-comparable depths (no normalization before the depth test).</li>
-  <li><strong>Cost:</strong> a small, bounded rounding error in the gradients (held to the low fraction
-      bits). Near a seam where two planes have nearly equal depth, integer-rounded ties resolve to the
-      first-drawn triangle &mdash; correct behavior for a <code>LESS</code> depth test.</li>
+  <li><strong>Affine depth is exact</strong> for projected geometry; attributes (color/texture) are not,
+      and aren't interpolated yet.</li>
+  <li><strong>Fixed-point depth:</strong> bounded width + cross-triangle-comparable depths, at the cost of
+      a small bounded rounding error near coincident-depth seams.</li>
+  <li><strong>Near plane:</strong> triangles crossing it are <em>rejected</em>, not clipped &mdash; fine
+      for a model placed fully in front of the camera.</li>
+  <li><strong>No backface cull:</strong> the depth buffer resolves visibility; back faces rasterize but
+      lose the test. (Adding a cull would roughly halve rasterization work.)</li>
+  <li><strong>On-screen:</strong> auto-fit keeps models in frame; a framebuffer-bounds guard is the
+      backstop. There is no screen-edge clipping yet.</li>
 </ul>
-<p>This is the standard hardware choice: <em>bounded width with tiny rounding</em> beats
-<em>exact but unbounded width</em>, because bounded width and comparable depths are what let depth be
-pipelined in silicon.</p>
 
 </body>
 </html>
