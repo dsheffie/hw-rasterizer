@@ -1,15 +1,5 @@
 
-typedef struct packed {
-   logic [31:0] v0_x;
-   logic [31:0] v0_y;
-   logic [31:0] v1_x;
-   logic [31:0] v1_y;
-   logic [31:0] v2_x;
-   logic [31:0] v2_y;   
-} triangle_t;
-
-
-module rasterize(clk, rst, go, 
+module rasterize(clk, rst, go,
 		 v0_x, v0_y,
 		 v1_x, v1_y,
 		 v2_x, v2_y,
@@ -75,7 +65,9 @@ module rasterize(clk, rst, go,
 			     } state_t;
    
    state_t r_state, n_state;
-   triangle_t r_tri;
+   logic [31:0] r_v0_x, r_v0_y;
+   logic [31:0] r_v1_x, r_v1_y;
+   logic [31:0] r_v2_x, r_v2_y;
    logic 	t_save_tri, t_push_frag;
 
    localparam LG_OUTQ_D = 4;
@@ -132,14 +124,14 @@ module rasterize(clk, rst, go,
    wire [31:0]	w_sub2 = t_sub_a2 - t_sub_b2;   
    
    /* compute bounding box */
-   wire [31:0] 	w_x_min0 = r_tri.v0_x < r_tri.v1_x ? r_tri.v0_x : r_tri.v1_x;
-   wire [31:0] 	w_y_min0 = r_tri.v0_y < r_tri.v1_y ? r_tri.v0_y : r_tri.v1_y;
-   wire [31:0] 	w_x_max0 = r_tri.v0_x < r_tri.v1_x ? r_tri.v1_x : r_tri.v0_x;
-   wire [31:0] 	w_y_max0 = r_tri.v0_y < r_tri.v1_y ? r_tri.v1_y : r_tri.v0_y;
-   wire [31:0] 	w_x_min = r_tri.v2_x < w_x_min0 ? r_tri.v2_x : w_x_min0;   
-   wire [31:0] 	w_y_min = r_tri.v2_y < w_y_min0 ? r_tri.v2_y : w_y_min0;
-   wire [31:0] 	w_x_max = r_tri.v2_x < w_x_max0 ? w_x_max0 : r_tri.v2_x;
-   wire [31:0] 	w_y_max = r_tri.v2_y < w_y_max0 ? w_y_max0 : r_tri.v2_y;      
+   wire [31:0] 	w_x_min0 = r_v0_x < r_v1_x ? r_v0_x : r_v1_x;
+   wire [31:0] 	w_y_min0 = r_v0_y < r_v1_y ? r_v0_y : r_v1_y;
+   wire [31:0] 	w_x_max0 = r_v0_x < r_v1_x ? r_v1_x : r_v0_x;
+   wire [31:0] 	w_y_max0 = r_v0_y < r_v1_y ? r_v1_y : r_v0_y;
+   wire [31:0] 	w_x_min = r_v2_x < w_x_min0 ? r_v2_x : w_x_min0;   
+   wire [31:0] 	w_y_min = r_v2_y < w_y_min0 ? r_v2_y : w_y_min0;
+   wire [31:0] 	w_x_max = r_v2_x < w_x_max0 ? w_x_max0 : r_v2_x;
+   wire [31:0] 	w_y_max = r_v2_y < w_y_max0 ? w_y_max0 : r_v2_y;      
 
    
    logic [31:0] r_mul, rr_mul;
@@ -193,16 +185,16 @@ module rasterize(clk, rst, go,
 	
 	// if(r_state == COMPUTE_START_CROSS_V0V1_X)
 	//   begin
-	//      t_w0  = crossp(r_tri.v0_x, r_tri.v0_y, 
-	// 		    r_tri.v1_x, r_tri.v1_y,
+	//      t_w0  = crossp(r_v0_x, r_v0_y, 
+	// 		    r_v1_x, r_v1_y,
 	// 		    r_x_min, r_y_min);
 	     
-	//      t_w1  = crossp(r_tri.v2_x, r_tri.v2_y, 
-	// 		    r_tri.v0_x, r_tri.v0_y,
+	//      t_w1  = crossp(r_v2_x, r_v2_y, 
+	// 		    r_v0_x, r_v0_y,
 	// 		    r_x_min, r_y_min);
 	     
-	//      t_w2  = crossp(r_tri.v1_x, r_tri.v1_y, 
-	// 		    r_tri.v2_x, r_tri.v2_y,
+	//      t_w2  = crossp(r_v1_x, r_v1_y, 
+	// 		    r_v2_x, r_v2_y,
 	// 		    r_x_min, r_y_min);
 	//   end
 
@@ -283,27 +275,27 @@ module rasterize(clk, rst, go,
 	    end
 	  COMPUTE_XVEC:
 	    begin
-	       t_sub_a0 = r_tri.v2_x;
-	       t_sub_b0 = r_tri.v1_x;
+	       t_sub_a0 = r_v2_x;
+	       t_sub_b0 = r_v1_x;
 	       n_v2v1_x = w_sub0;
-	       t_sub_a1 = r_tri.v0_x;
-	       t_sub_b1 = r_tri.v2_x;
+	       t_sub_a1 = r_v0_x;
+	       t_sub_b1 = r_v2_x;
 	       n_v0v2_x = w_sub1;
-	       t_sub_a2 = r_tri.v1_x;
-	       t_sub_b2 = r_tri.v0_x;	       
+	       t_sub_a2 = r_v1_x;
+	       t_sub_b2 = r_v0_x;	       
 	       n_v1v0_x = w_sub2;
 	       n_state = COMPUTE_YVEC;
 	    end
 	  COMPUTE_YVEC:
 	    begin
-	       t_sub_a0 = r_tri.v2_y;
-	       t_sub_b0 = r_tri.v1_y;
+	       t_sub_a0 = r_v2_y;
+	       t_sub_b0 = r_v1_y;
 	       n_v2v1_y = w_sub0;
-	       t_sub_a1 = r_tri.v0_y;
-	       t_sub_b1 = r_tri.v2_y;
+	       t_sub_a1 = r_v0_y;
+	       t_sub_b1 = r_v2_y;
 	       n_v0v2_y = w_sub1;
-	       t_sub_a2 = r_tri.v1_y;
-	       t_sub_b2 = r_tri.v0_y;	       
+	       t_sub_a2 = r_v1_y;
+	       t_sub_b2 = r_v0_y;	       
 	       n_v1v0_y = w_sub2;
 	       n_state = COMPUTE_START_ADDR;
 	    end
@@ -411,12 +403,12 @@ module rasterize(clk, rst, go,
      begin
 	if(t_save_tri)
 	  begin
-	     r_tri.v0_x <= v0_x;
-	     r_tri.v0_y <= v0_y;
-	     r_tri.v1_x <= v1_x;
-	     r_tri.v1_y <= v1_y;
-	     r_tri.v2_x <= v2_x;
-	     r_tri.v2_y <= v2_y;	     
+	     r_v0_x <= v0_x;
+	     r_v0_y <= v0_y;
+	     r_v1_x <= v1_x;
+	     r_v1_y <= v1_y;
+	     r_v2_x <= v2_x;
+	     r_v2_y <= v2_y;	     
 	  end
      end
    
