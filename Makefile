@@ -37,10 +37,10 @@ EXE = hw_rasterize
 
 all: $(EXE)
 
-$(EXE) : $(OBJ) obj_dir/Vcore_l1d_l1i__ALL.a
+$(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a
 	$(CXX) $(CXXFLAGS) $(OBJ) obj_dir/*.o $(LIBS) -o $(EXE)
 
-top.o: top.cc obj_dir/Vcore_l1d_l1i__ALL.a
+top.o: top.cc obj_dir/Vrasterize__ALL.a
 	$(CXX) -MMD $(CXXFLAGS) -Iobj_dir -c $< 
 
 verilated.o: $(VERILATOR_SRC)
@@ -49,7 +49,7 @@ verilated.o: $(VERILATOR_SRC)
 %.o: %.cc
 	$(CXX) -MMD $(CXXFLAGS) -c $< 
 
-obj_dir/Vcore_l1d_l1i__ALL.a : $(SV_SRC)
+obj_dir/Vrasterize__ALL.a : $(SV_SRC)
 	$(VERILATOR) --x-assign unique -cc rasterize.sv
 	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir -f Vrasterize.mk
 
