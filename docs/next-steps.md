@@ -35,9 +35,10 @@ natural CRIME-style trajectory of pushing more work into hardware.
    alias addresses. *`pipeline.cc`, and the bounding-box logic in
    `rasterize.sv`.*
 
-3. **Backface culling.** Drop back faces by eye-space normal sign before
-   rasterizing. Roughly halves rasterization work and is needed for correct
-   open meshes. Ties directly to the cycle counter (see #5). *`pipeline.cc`.*
+3. **Backface culling.** *Done* — drops back faces by the eye-space normal
+   test (`dot(N, e0) >= 0`) before rasterizing; `--no-cull` disables it.
+   Measured on bigguy: 2872 → 1437 triangles, ~49% fewer clocks and ~50%
+   fewer fragments, visible image unchanged. *`pipeline.cc`.*
 
 ## Moving work into hardware (the CRIME trajectory)
 
@@ -47,10 +48,12 @@ natural CRIME-style trajectory of pushing more work into hardware.
    `LESS`/`LEQUAL`/… functions. This is exactly where the fixed-point,
    cross-triangle-comparable depth pays off — the test becomes a plain `<`.
 
-5. **Profile with the cycle counter.** `top.cc` now reports the simulated
-   clock count per run. Use it to quantify bounding-box overdraw and the
-   win from backface culling (#3) and tighter traversal. Good baseline
-   before optimizing.
+5. **Profile with the cycle/pixel counters.** `top.cc` reports clocks,
+   fragments, and pixels-per-triangle. Backface culling (#3) is measured;
+   the overhead left to chase is bounding-box overscan (the scan clocks
+   every bbox pixel, ~half outside the triangle) and the ~8–9 fixed setup
+   clocks per triangle, which dominate for small triangles (~4 clocks/pixel
+   observed).
 
 ## Rendering features
 

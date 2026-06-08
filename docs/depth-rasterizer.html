@@ -97,12 +97,19 @@ plane in screen space. (Perspective non-linearity only affects <em>attributes</e
 which aren't interpolated here.) So the entire 3D upgrade is new host code &mdash; the rasterizer and the
 depth path are unchanged.</div>
 
+<h3>Backface culling</h3>
+<p>A triangle whose eye-space normal points away from the camera is a back face; on a closed, opaque
+model it is always hidden by a front face, so it is dropped before rasterizing. The test is
+<code>dot(N, e0) &ge; 0</code> &mdash; <code>e0</code> runs from the camera (origin) to the face, so a
+camera-facing normal opposes it. This removes about half the triangles of a closed mesh (on bigguy,
+2872&nbsp;&rarr;&nbsp;1437, roughly halving clocks and fragments) with no change to the visible image.
+It is on by default; <code>--no-cull</code> disables it.</p>
+
 <h3>Winding fixup and flat shading</h3>
 <p>The RTL's coverage test assumes one winding (all edge weights &ge; 0, i.e. positive screen area). After
-projection a front-facing triangle may come out either way, so each triangle's screen area is checked and
-its last two vertices swapped if needed (degenerate, zero-area triangles are dropped). Visibility is left
-to the depth buffer &mdash; back faces still rasterize but lose the depth test &mdash; so no explicit
-backface cull is needed in this first cut.</p>
+projection a surviving triangle may wind either way, so its screen area is checked and the last two
+vertices swapped if needed (zero-area triangles are dropped). With culling off, back faces also rasterize
+but simply lose the depth test, so the visible image is the same either way.</p>
 <p>Shading is flat per triangle from the eye-space face normal and a directional light, made two-sided so
 the camera-facing surface is always lit:</p>
 <pre><code>N  = cross(e1-e0, e2-e0);  if (N faces away) N = -N;   // two-sided
@@ -205,8 +212,9 @@ nearest surface at each pixel wins, which for a closed model is its front face.<
       a small bounded rounding error near coincident-depth seams.</li>
   <li><strong>Near plane:</strong> triangles crossing it are <em>rejected</em>, not clipped &mdash; fine
       for a model placed fully in front of the camera.</li>
-  <li><strong>No backface cull:</strong> the depth buffer resolves visibility; back faces rasterize but
-      lose the test. (Adding a cull would roughly halve rasterization work.)</li>
+  <li><strong>Backface culling</strong> (on by default, <code>--no-cull</code> to disable): drops back
+      faces by eye-space normal before rasterizing &mdash; roughly halves clocks and fragments on a
+      closed mesh, with no visible change. The depth buffer still resolves any remaining overlap.</li>
   <li><strong>On-screen:</strong> auto-fit keeps models in frame; a framebuffer-bounds guard is the
       backstop. There is no screen-edge clipping yet.</li>
 </ul>
