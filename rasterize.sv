@@ -10,24 +10,35 @@ typedef struct packed {
 
 
 module rasterize(clk, rst, go, 
-		 v0_x, v0_y, 
-		 v1_x, v1_y, 
+		 v0_x, v0_y,
+		 v1_x, v1_y,
 		 v2_x, v2_y,
 		 w0,w1,w2,
-		 x_dim, y_dim, 
-		 pop_frag, addr_q, pixel_q, valid_q, done) ;
+		 dzdx, dzdy, z_start,
+		 x_dim, y_dim,
+		 pop_frag, 
+		 addr_q, 
+		 pixel_q, 
+		 valid_q, 
+		 done) ;
    input logic clk;
    input logic rst;
    input logic go;
    input logic [31:0] v0_x;
    input logic [31:0] v0_y;
+   
    input logic [31:0] v1_x;
    input logic [31:0] v1_y;
+   
    input logic [31:0] v2_x;
    input logic [31:0] v2_y;
+   
    input logic [31:0] w0;
    input logic [31:0] w1;
-   input logic [31:0] w2;   
+   input logic [31:0] w2;
+   input logic [31:0] dzdx;
+   input logic [31:0] dzdy;
+   input logic [31:0] z_start;
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
@@ -100,7 +111,10 @@ module rasterize(clk, rst, go,
 
    logic [31:0] r_w0_y, n_w0_y;
    logic [31:0] r_w1_y, n_w1_y;
-   logic [31:0] r_w2_y, n_w2_y;   
+   logic [31:0] r_w2_y, n_w2_y;
+
+   logic [31:0] r_z, n_z;
+   logic [31:0] r_z_y, n_z_y;
    
    logic [31:0] t_mul_a, t_mul_b;
    logic [31:0] t_sub_a0, t_sub_b0;
@@ -154,7 +168,7 @@ module rasterize(clk, rst, go,
 	if(t_push_frag)
 	  begin
              r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_addr;
-	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= 32'd0;
+	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z;
 	  end
      end
 
@@ -224,7 +238,10 @@ module rasterize(clk, rst, go,
 
 	n_w0_y = r_w0_y;
 	n_w1_y = r_w1_y;
-	n_w2_y = r_w2_y;	
+	n_w2_y = r_w2_y;
+
+	n_z = r_z;
+	n_z_y = r_z_y;
 
 	t_save_tri = 1'b0;
 	t_push_frag = 1'b0;
@@ -243,7 +260,9 @@ module rasterize(clk, rst, go,
 		    n_w1 = w1;
 		    n_w1_y = w1;
 		    n_w2 = w0;
-		    n_w2_y = w0;	 
+		    n_w2_y = w0;
+		    n_z = z_start;
+		    n_z_y = z_start;
 		 end
 	    end
 	  COMPUTE_BB:
@@ -330,6 +349,8 @@ module rasterize(clk, rst, go,
 			 t_sub_b2 = (~r_v1v0_x) + 32'd1;	
 			 n_w2 = w_sub2;
 			 n_w2_y = w_sub2;
+			 n_z = r_z_y + dzdy;
+			 n_z_y = r_z_y + dzdy;
 			 //$display("n_start_addr = %d, n_y = %d", n_start_addr, n_y);
 		      end
 		    else
@@ -348,7 +369,8 @@ module rasterize(clk, rst, go,
 			 t_sub_a2 = r_w2;
 			 t_sub_b2 = r_v1v0_y;	       
 			 n_w2 = w_sub2;
-			 
+			 n_z = r_z + dzdx;
+
 		      end // else: !if(r_x == r_x_max)
 		    
 		    if((r_y == w_y_max) & (r_x == r_x_max))
@@ -418,7 +440,9 @@ module rasterize(clk, rst, go,
 	r_w2 <= rst ? 'd0 : n_w2;
 	r_w0_y <= rst ? 'd0 : n_w0_y;
 	r_w1_y <= rst ? 'd0 : n_w1_y;
-	r_w2_y <= rst ? 'd0 : n_w2_y;		
+	r_w2_y <= rst ? 'd0 : n_w2_y;
+	r_z <= rst ? 'd0 : n_z;
+	r_z_y <= rst ? 'd0 : n_z_y;
      end // always_ff@ (posedge clk)
    
 endmodule // rasterize
