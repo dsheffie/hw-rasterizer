@@ -1,0 +1,6 @@
+# build artifacts
+*.o
+*.d
+obj_dir/
+hw_rasterize
+raster2d.ppm

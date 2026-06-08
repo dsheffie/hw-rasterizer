@@ -1,151 +1,96 @@
 #include <cstdint>
-#include <cassert>
+#include <cstring>
 #include <iostream>
 #include <fstream>
 #include "Vrasterize.h"
+#include "setup.h"
 
 const int32_t imageWidth = 512;
 const int32_t imageHeight = 512;
 
-struct pixel_t {
-  uint8_t b;
-  uint8_t g;
-  uint8_t r;
-  uint8_t a;
-  pixel_t(uint8_t b, uint8_t g, uint8_t r, uint8_t a) : b(b), g(g), r(r), a(a) {}
-};
-
 typedef uint8_t Rgb[3];
 
-struct vertex2d {
-  int32_t x;
-  int32_t y;
-  vertex2d(int32_t x, int32_t y) :
-    x(x), y(y) {}
-};
-
-std::ostream &operator<<(std::ostream &out, const vertex2d &v) {
-  out << "(" << v.x << "," << v.y << ")";
-  return out;
-}
-
-static int32_t cross(const vertex2d &a, const vertex2d &b, const vertex2d &p) {
-  vertex2d ab(b.x-a.x, b.y-a.y);
-  vertex2d ap(p.x-b.x, p.y-b.y);
-  //std::cout << a << "," << b << "," << p << "," << x << "\n";
-  return (ab.x * ap.y) - (ab.y * ap.x);
-}
-
-static int w_int[3] = {0};
-static int w_p = 0;
-
-extern "C" {
-  int crossp(int x0, int y0,
-	     int x1, int y1,
-	     int x2, int y2) {
-    vertex2d v0(x0, y0);
-    vertex2d v1(x1, y1);
-    vertex2d v2(x2, y2);
-    int x = cross(v0, v1, v2);
-    std::cout << w_p << "," << x << "\n";
-    w_int[w_p++] = x;
-    return x;
-  }
-}
-
-static int n_pix = 0;
-
-void check_frag(int x, int y, int w0, int w1, int w2) {
-  printf("check x=%d, y = %d, w0 = %d, w1 = %d, w2 = %d\n",
-	 x, y, w0, w1, w2);
-  //if(w0 >= 0 and w1 >= 0 and w2 >= 0) {
-  //printf("draw pixel at %d, %d\n", x, y);
-  //}
-
-  n_pix++;
-  //if(n_pix == 3) {
-  //    exit(-1);
-  //}
-}
-
-
 static inline void tick(Vrasterize *tb) {
-  tb->clk = (~tb->clk) & 1;   
+  tb->clk = (~tb->clk) & 1;
   tb->eval();
   tb->clk = (~tb->clk) & 1;
-  tb->eval();    
+  tb->eval();
 }
 
-int main(int argc, char *argv[]) {
-  Vrasterize *tb = nullptr;
-  const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
-  contextp->commandArgs(argc, argv);
+// Drive the RTL for one triangle, draining fragments through a software
+// depth buffer (nearest z wins).  Expects the model in IDLE on entry and
+// leaves it in IDLE on return.
+static void render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
+			    const vertex3d &v0, const vertex3d &v1, const vertex3d &v2,
+			    uint8_t r, uint8_t g, uint8_t b) {
+  // x/y vertices feed the on-chip bounding-box and edge-delta logic
+  tb->v0_x = v0.x; tb->v0_y = v0.y;
+  tb->v1_x = v1.x; tb->v1_y = v1.y;
+  tb->v2_x = v2.x; tb->v2_y = v2.y;
 
+  // host-computed edge weights and depth plane equation
+  tri_setup s = setup_triangle(v0, v1, v2);
+  tb->w0 = s.w0; tb->w1 = s.w1; tb->w2 = s.w2;
+  tb->dzdx = s.dzdx; tb->dzdy = s.dzdy; tb->z_start = s.z_start;
 
-  
-  tb = new Vrasterize;
-  tb->clk = 0;
-  tb->rst = 1;
-  tb->go  = 0;
+  tb->go = 1; tick(tb); tb->go = 0;
 
-  tb->v0_x = 50;
-  tb->v0_y = 50;
-  
-  tb->v1_x = 100;
-  tb->v1_y = 25;
-  
-  tb->v2_x = 50;
-  tb->v2_y = 100;
-
-
-  tb->w0 = crossp(tb->v0_x, tb->v0_y,
-		  tb->v1_x, tb->v1_y,
-		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
-		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)		  
-		  );
-
-  tb->w1 = crossp(tb->v2_x, tb->v2_y,
-		  tb->v0_x, tb->v0_y,
-		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
-		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)		  
-		  );
-
-  tb->w2 = crossp(tb->v1_x, tb->v1_y,
-		  tb->v2_x, tb->v2_y,
-		  std::min(std::min(tb->v0_x, tb->v1_x), tb->v2_x),
-		  std::min(std::min(tb->v0_y, tb->v1_y), tb->v2_y)
-		  );
-  
-  
-  tb->x_dim = imageWidth;
-  tb->y_dim = imageHeight;
-  tick(tb);
-  tb->rst = 0;
-  tick(tb);
-  tb->go = 1;
-  tick(tb);
-  tb->go = 0;
-
-  int w = imageWidth;
-  int h = imageHeight;
-  Rgb *framebuffer = new Rgb[w * h];
-  memset(framebuffer, 0x0, w * h * 3);
   bool done = false;
   while(not(done)) {
     tb->clk = (~tb->clk) & 1;
-    tb->pop_frag = 0;          
+    tb->pop_frag = 0;
     tb->eval();
     if(tb->done) {
       done = true;
     }
     if(tb->valid_q) {
-      //printf("got valid frag, addr %d\n", tb->addr_q);
-      framebuffer[tb->addr_q][0] = 255;
-      tb->pop_frag = 1;      
+      int32_t z = (int32_t)tb->pixel_q / s.area;   // recover interpolated depth
+      int32_t addr = tb->addr_q;
+      if(z < zbuf[addr]) {                          // depth test: nearest wins
+	zbuf[addr] = z;
+	fb[addr][0] = r;
+	fb[addr][1] = g;
+	fb[addr][2] = b;
+      }
+      tb->pop_frag = 1;
     }
-    tb->clk = (~tb->clk) & 1;   
-    tb->eval();    
+    tb->clk = (~tb->clk) & 1;
+    tb->eval();
   }
+}
+
+int main(int argc, char *argv[]) {
+  const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
+  contextp->commandArgs(argc, argv);
+
+  Vrasterize *tb = new Vrasterize;
+  tb->clk = 0;
+  tb->rst = 1;
+  tb->go  = 0;
+  tb->pop_frag = 0;
+  tb->x_dim = imageWidth;
+  tb->y_dim = imageHeight;
+
+  tick(tb);
+  tb->rst = 0;
+  tick(tb);
+
+  const int w = imageWidth, h = imageHeight;
+  Rgb *framebuffer = new Rgb[w * h];
+  memset(framebuffer, 0x0, w * h * 3);
+
+  // software depth buffer: nearest (smallest z) wins
+  int32_t *zbuf = new int32_t[w * h];
+  for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
+
+  // Two triangles sharing the same screen footprint but with opposite
+  // depth gradients, so their planes intersect: red is nearer along the
+  // v0-v1 edge, green is nearer at v2.  Red is drawn first, so a correct
+  // depth buffer yields a red/green seam (not an all-green paint-over).
+  render_triangle(tb, framebuffer, zbuf,
+		  {60,60,10}, {260,100,10}, {100,260,60}, 255,   0, 0);
+  render_triangle(tb, framebuffer, zbuf,
+		  {60,60,60}, {260,100,60}, {100,260,10},   0, 255, 0);
 
   std::cout << "all done, trying to write image\n";
   std::ofstream ofs;
@@ -155,9 +100,8 @@ int main(int argc, char *argv[]) {
   ofs.close();
 
   delete [] framebuffer;
-  
-  
+  delete [] zbuf;
+  delete tb;
+
   return 0;
 }
-
-				  
