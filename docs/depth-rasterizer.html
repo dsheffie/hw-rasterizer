@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depth in the hardware rasterizer</title>
+<style>
+  :root { --fg:#1b1b1b; --muted:#666; --accent:#0a5; --rule:#ddd; --code-bg:#f5f5f5; }
+  body { font: 16px/1.6 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+         color: var(--fg); max-width: 860px; margin: 2.5rem auto; padding: 0 1.2rem; }
+  h1 { font-size: 1.9rem; margin-bottom: 0.2rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.2rem; border-bottom: 2px solid var(--accent);
+       padding-bottom: 0.25rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+  .sub { color: var(--muted); margin-top: 0; }
+  code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px;
+         font: 0.88em/1.5 "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 0.9rem 1.1rem; border-radius: 6px;
+        overflow-x: auto; border: 1px solid var(--rule); }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--rule);
+           vertical-align: top; }
+  th { border-bottom: 2px solid var(--accent); }
+  .note { background: #f0f8f4; border-left: 4px solid var(--accent);
+          padding: 0.7rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; }
+  .file { color: var(--muted); font-size: 0.85em; }
+  ul { padding-left: 1.3rem; }
+</style>
+</head>
+<body>
+
+<h1>Depth in the hardware rasterizer</h1>
+<p class="sub">How per-fragment depth is set up on the host and interpolated in the RTL.</p>
+
+<p>This rasterizer follows the <strong>SGI CRIME</strong> model (CRIME 1.5 spec, &sect;7.3.5&ndash;7.3.7):
+the host computes the triangle's <em>plane&nbsp;equation</em>, and the hardware contains only
+<em>steppers</em> &mdash; adder/subtractors that walk the value across the bounding box one pixel at a
+time. Nothing is divided or multiplied per pixel; the host hands the RTL a starting value plus
+per-step increments, and the RTL reaches every pixel with adds and subtracts.</p>
+
+<p>The same machinery does two independent jobs: <strong>coverage</strong> (is this pixel inside the
+triangle?) via three edge functions, and <strong>depth</strong> (what is <code>z</code> here?) via the
+depth plane equation. The host side of both lives in <code class="file">setup.cc</code>; the stepping
+lives in <code class="file">rasterize.sv</code>.</p>
+
+<h2>The host side: <code>setup_triangle()</code></h2>
+<p class="file">setup.cc</p>
+<p><code>setup_triangle()</code> takes three <code>(x,y,z)</code> vertices and returns the values the RTL
+needs <em>at the pixel where it starts scanning</em>.</p>
+
+<h3>1. The start corner</h3>
+<pre><code>int32_t xs = std::min(std::min(v0.x, v1.x), v2.x);
+int32_t ys = std::min(std::min(v0.y, v1.y), v2.y);</code></pre>
+<p><code>(xs, ys)</code> is the upper-left corner of the triangle's bounding box &mdash; exactly where the
+RTL begins (<code>COMPUTE_BB</code> sets <code>r_x = x_min</code>, <code>r_y = y_min</code>). Every initial
+value below is therefore computed at the precise pixel the hardware steps away from.</p>
+
+<h3>2. Edge functions (coverage)</h3>
+<pre><code>// (b-a) x (p-b)  -- the edge function for directed edge a->b at point p
+int32_t cross(const vertex2d &a, const vertex2d &b, const vertex2d &p);
+
+s.w0 = cross(v0, v1, p);   // edge v0 -> v1
+s.w1 = cross(v2, v0, p);   // edge v2 -> v0
+s.w2 = cross(v1, v2, p);   // edge v1 -> v2</code></pre>
+<p>Each edge function is a signed quantity: zero on the edge's line, positive on one side, negative on
+the other. A pixel is inside the triangle when all three share a sign &mdash; in this design, all
+&ge;&nbsp;0. The RTL's coverage test is exactly <code>(r_w0[31] | r_w1[31] | r_w2[31]) == 0</code> (no
+sign bit set). <code>setup.cc</code> computes only the <em>starting</em> weights; the RTL steps each
+one by that edge's <code>dx</code>/<code>dy</code> (derived on-chip from the vertices) as it scans.</p>
+<div class="note">The edge ordering (v0&rarr;v1, v2&rarr;v0, v1&rarr;v2) is a contract with the RTL: it
+must match how the hardware pairs each weight with its edge deltas. Change the stepper wiring and these
+three lines have to change with it.</div>
+
+<h3>3. The depth plane</h3>
+<p>The plane <code>z(x,y) = A&middot;x + B&middot;y + C</code> through the three <code>(x,y,z)</code>
+vertices is solved by Cramer's rule. The shared denominator is twice the signed triangle area; the
+gradient numerators are the determinants with the z-column swapped in:</p>
+<pre><code>int64_t area     = x0*(y1-y2) - y0*(x1-x2) + (x1*y2 - x2*y1);  // 2 * signed area
+int64_t dzdx_num = z0*(y1-y2) - y0*(z1-z2) + (z1*y2 - z2*y1);  // = area * dz/dx
+int64_t dzdy_num = x0*(z1-z2) - z0*(x1-x2) + (x1*z2 - x2*z1);  // = area * dz/dy</code></pre>
+
+<h3>4. Normalize once, into fixed-point</h3>
+<p>The real gradients <code>dz/dx</code>, <code>dz/dy</code> are fractional (e.g. 0.8), so plain
+integers would round them to 0 and depth would be flat. Instead we divide by <code>area</code>
+<strong>once per triangle</strong> and keep the result in signed fixed-point with
+<code>DEPTH_FRAC_BITS</code> fraction bits:</p>
+<pre><code>s.dzdx = (dzdx_num &lt;&lt; DEPTH_FRAC_BITS) / area;   // true dz/dx, Q.DEPTH_FRAC_BITS
+s.dzdy = (dzdy_num &lt;&lt; DEPTH_FRAC_BITS) / area;
+
+int64_t z0_fx = (int64_t)v0.z &lt;&lt; DEPTH_FRAC_BITS;
+s.z_start = z0_fx + s.dzdx*(xs-v0.x) + s.dzdy*(ys-v0.y)
+          + (1 &lt;&lt; (DEPTH_FRAC_BITS-1));            // +0.5 LSB: round, not truncate</code></pre>
+<p><code>z_start</code> is the depth at the start corner (CRIME EQ&nbsp;10, scaled), and the half-LSB makes
+the RTL's later fraction truncation behave as round-to-nearest.</p>
+
+<h2>The fixed-point format</h2>
+<p>The format is a single source of truth, declared as named constants on both sides of the
+hardware/software boundary &mdash; they <strong>must match</strong>.</p>
+<table>
+  <tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
+  <tr><td><code>DEPTH_FRAC_BITS</code></td><td>12</td><td>fraction bits carried by the stepper</td></tr>
+  <tr><td><code>DEPTH_INT_BITS</code></td><td>25</td><td>integer bits (24-bit depth + sign headroom)</td></tr>
+  <tr><td><code>DEPTH_W</code></td><td>37</td><td>total stepper width = 25.12, CRIME's depth format</td></tr>
+</table>
+<p class="file">DEPTH_FRAC_BITS is defined in both setup.h (host) and rasterize.sv (RTL).</p>
+<div class="note">Why this matters: a fixed width is independent of triangle/screen size (the older
+<code>z&middot;area</code> scheme grew without bound), and because every triangle's depth is normalized
+to the <em>same</em> units, depth values are directly comparable across triangles &mdash; a hardware
+depth test would be a plain <code>&lt;</code> comparator with no per-fragment divide.</div>
+
+<h2>The hardware side: the depth stepper</h2>
+<p class="file">rasterize.sv</p>
+<p>The RTL loads <code>z_start</code> and steps it &mdash; nothing more:</p>
+<pre><code>// load at the start corner
+n_z = z_start;  n_z_y = z_start;
+
+// advance one pixel in +x
+n_z = r_z + dzdx;
+
+// wrap to the next row (x resets, y advances)
+n_z = r_z_y + dzdy;  n_z_y = r_z_y + dzdy;
+
+// emit the fragment depth: drop the fraction bits (truncate to integer)
+r_pixelq[...] &lt;= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);</code></pre>
+<p><code>r_z</code> tracks the current pixel's depth; <code>r_z_y</code> latches the row's starting depth so
+each new row resumes from the correct value. Because the depth is already normalized, the emitted
+<code>pixel_q</code> is true depth &mdash; no further scaling needed downstream.</p>
+
+<h2>End-to-end data flow</h2>
+<table>
+  <tr><th>setup.cc produces</th><th>rasterize.sv does</th><th>top.cc does</th></tr>
+  <tr><td><code>w0,w1,w2</code> (at start corner)</td><td>steps each by edge dx/dy; sign test = coverage</td><td>&mdash;</td></tr>
+  <tr><td><code>z_start</code> (Q.12 depth at start)</td><td>loads into <code>r_z</code></td><td>&mdash;</td></tr>
+  <tr><td><code>dzdx</code></td><td><code>r_z += dzdx</code> on +x</td><td>&mdash;</td></tr>
+  <tr><td><code>dzdy</code></td><td><code>r_z = r_z_y + dzdy</code> on row wrap</td><td>&mdash;</td></tr>
+  <tr><td>&mdash;</td><td>emits <code>pixel_q = r_z &gt;&gt; 12</code> (true depth)</td><td>depth test: <code>if (pixel_q &lt; zbuf[addr])</code></td></tr>
+</table>
+<p>The software z-buffer in <code>top.cc</code> keeps a per-pixel nearest depth and writes a fragment's
+color only if it passes the test. Because depths are comparable across triangles, two triangles whose
+planes intersect produce a clean depth seam &mdash; the regression scene draws exactly that.</p>
+
+<h2>The trade-off</h2>
+<ul>
+  <li><strong>Gained:</strong> bounded register width; one divide per triangle instead of per fragment;
+      cross-triangle-comparable depths (no normalization before the depth test).</li>
+  <li><strong>Cost:</strong> a small, bounded rounding error in the gradients (held to the low fraction
+      bits). Near a seam where two planes have nearly equal depth, integer-rounded ties resolve to the
+      first-drawn triangle &mdash; correct behavior for a <code>LESS</code> depth test.</li>
+</ul>
+<p>This is the standard hardware choice: <em>bounded width with tiny rounding</em> beats
+<em>exact but unbounded width</em>, because bounded width and comparable depths are what let depth be
+pipelined in silicon.</p>
+
+</body>
+</html>
