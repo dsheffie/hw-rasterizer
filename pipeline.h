@@ -14,10 +14,11 @@ struct screen_tri {
 };
 
 // Run the 3D software pipeline over a model: model/view/projection
-// transform, near-plane reject, perspective divide, viewport mapping,
-// winding fixup (so coverage matches the RTL), and flat (N.L) shading.
-// Produces screen-space triangles to feed the rasterizer.
+// transform, near-plane reject, optional backface cull, perspective
+// divide, viewport mapping, winding fixup (so coverage matches the RTL),
+// and flat (N.L) shading.  Produces screen-space triangles to feed the
+// rasterizer.
 std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
-				     int width, int height);
+				     int width, int height, bool cull_backfaces);
 
 #endif

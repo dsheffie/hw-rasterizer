@@ -47,7 +47,7 @@ namespace {
 }
 
 std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
-				     int width, int height) {
+				     int width, int height, bool cull_backfaces) {
   std::vector<screen_tri> out;
   if(mesh.empty()) return out;
 
@@ -83,6 +83,10 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
 
     v3 e0{e[0].x,e[0].y,e[0].z}, e1{e[1].x,e[1].y,e[1].z}, e2{e[2].x,e[2].y,e[2].z};
     v3 N = cross(sub(e1,e0), sub(e2,e0));
+
+    // backface cull: e0 points from the camera (origin) to the face, so a
+    // camera-facing normal opposes it (dot < 0); drop the rest.
+    if(cull_backfaces && dot(N, e0) >= 0) continue;
 
     // project to screen + quantized depth
     vertex3d sv[3];

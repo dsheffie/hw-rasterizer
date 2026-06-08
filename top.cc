@@ -72,6 +72,10 @@ int main(int argc, char *argv[]) {
   const char *model_path = "bigguy.obj";
   if(argc > 1 && argv[1][0] != '+' && argv[1][0] != '-') model_path = argv[1];
 
+  bool cull = true;                       // backface culling, toggle with --no-cull
+  for(int i = 1; i < argc; i++)
+    if(strcmp(argv[i], "--no-cull") == 0) cull = false;
+
   Vrasterize *tb = new Vrasterize;
   tb->clk = 0;
   tb->rst = 1;
@@ -99,9 +103,10 @@ int main(int argc, char *argv[]) {
     std::cerr << "failed to load model: " << model_path << "\n";
     return 1;
   }
-  std::vector<screen_tri> tris = project_mesh(mesh, w, h);
+  std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull);
   std::cout << "model " << model_path << ": " << mesh.size()
-	    << " triangles, " << tris.size() << " after pipeline\n";
+	    << " triangles, " << tris.size() << " after pipeline"
+	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
 
   uint64_t ticks = 0, pixels = 0;
   for(const screen_tri &t : tris) {
