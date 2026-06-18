@@ -12,7 +12,7 @@ module rasterize(clk, rst, go,
 		 pop_frag,
 		 addr_q,
 		 pixel_q,
-		 sw_q, tw_q, iw_q,
+		 u_q, v_q,
 		 valid_q,
 		 done) ;
    // Depth interpolation fixed-point format: DEPTH_INT_BITS.DEPTH_FRAC_BITS
@@ -65,9 +65,8 @@ module rasterize(clk, rst, go,
    
    output logic [31:0] addr_q;
    output logic [31:0] pixel_q;
-   output logic [SW_W-1:0] sw_q;
-   output logic [SW_W-1:0] tw_q;
-   output logic [IW_W-1:0] iw_q;
+   output logic [31:0] u_q;     // recovered u, Q16 (uv units), signed
+   output logic [31:0] v_q;     // recovered v, Q16 (uv units), signed
    output logic        valid_q;
    output logic        done;
    
@@ -93,7 +92,8 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v0_x, r_v0_y;
    logic [31:0] r_v1_x, r_v1_y;
    logic [31:0] r_v2_x, r_v2_y;
-   logic 	t_save_tri, t_push_frag;
+   logic 	t_save_tri;
+   logic 	t_push_frag;
 
    localparam LG_OUTQ_D = 4;
 
@@ -127,9 +127,8 @@ module rasterize(clk, rst, go,
    logic 	r_done, n_done;
    logic [31:0] r_addrq [(1<<LG_OUTQ_D)-1:0];
    logic [31:0] r_pixelq [(1<<LG_OUTQ_D)-1:0];
-   logic [SW_W-1:0] r_swq [(1<<LG_OUTQ_D)-1:0];
-   logic [SW_W-1:0] r_twq [(1<<LG_OUTQ_D)-1:0];
-   logic [IW_W-1:0] r_iwq [(1<<LG_OUTQ_D)-1:0];
+   logic [31:0] r_uq [(1<<LG_OUTQ_D)-1:0];
+   logic [31:0] r_vq [(1<<LG_OUTQ_D)-1:0];
    
    logic [31:0] r_w0, n_w0;
    logic [31:0] r_w1, n_w1;
@@ -185,9 +184,8 @@ module rasterize(clk, rst, go,
 	valid_q = r_wrq_ptr != r_rdq_ptr;
 	addr_q = r_addrq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 	pixel_q = r_pixelq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	sw_q = r_swq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	tw_q = r_twq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	iw_q = r_iwq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+	u_q = r_uq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+	v_q = r_vq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 
 	if(t_push_frag)
 	  begin
@@ -203,11 +201,10 @@ module rasterize(clk, rst, go,
      begin
 	if(t_push_frag)
 	  begin
-             r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_addr;
-	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);
-	     r_swq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sw;
-	     r_twq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_tw;
-	     r_iwq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_iw;
+             r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sb_addr[3];
+	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sb_depth[3];
+	     r_uq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= w_u;
+	     r_vq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= w_v;
 	  end
      end
 
@@ -216,6 +213,57 @@ module rasterize(clk, rst, go,
    wire w_queue_not_full = !w_queue_full;
 
    wire w_queue_empty = r_wrq_ptr == r_rdq_ptr;
+
+   // ---- perspective divide: 1/w reciprocal + u/w, t/w multiplies ----
+   // The steppers produce (r_sw, r_tw, r_iw) per pixel.  Feed 1/w into the
+   // pipelined reciprocal and carry (addr, depth, u/w, t/w) down a matching
+   // 4-deep side-band so they align with the reciprocal's output, then recover
+   //   u = (u/w) / (1/w),   v = (t/w) / (1/w)
+   // and push (addr, depth, u, v) to the output queue.
+   wire w_pipe_en = w_queue_not_full;
+   wire w_covered = (r_w0[31] | r_w1[31] | r_w2[31]) == 1'b0;
+   wire w_feed    = (r_state == RENDER) & w_queue_not_full & w_covered;
+
+   wire        w_recip_valid, w_recip_busy;
+   wire [17:0] w_recip_y;
+   wire [4:0]  w_recip_e;
+   recip u_recip(.clk(clk), .rst(rst), .en(w_pipe_en),
+		 .valid_in(w_feed), .d(32'(r_iw)),
+		 .valid_out(w_recip_valid), .busy(w_recip_busy),
+		 .y(w_recip_y), .e(w_recip_e));
+
+   assign t_push_frag = w_recip_valid & w_queue_not_full;
+
+   // side-band: carry address, depth and u/w, t/w through the same 4-cycle
+   // latency as the reciprocal (gated by the same enable)
+   logic [31:0]     r_sb_addr  [0:3];
+   logic [31:0]     r_sb_depth [0:3];
+   logic [SW_W-1:0] r_sb_sw    [0:3];
+   logic [SW_W-1:0] r_sb_tw    [0:3];
+   always_ff@(posedge clk)
+     if(w_pipe_en)
+       begin
+	  r_sb_addr[0]  <= r_addr;
+	  r_sb_depth[0] <= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);
+	  r_sb_sw[0]    <= r_sw;
+	  r_sb_tw[0]    <= r_tw;
+	  for(int i = 1; i < 4; i++)
+	    begin
+	       r_sb_addr[i]  <= r_sb_addr[i-1];
+	       r_sb_depth[i] <= r_sb_depth[i-1];
+	       r_sb_sw[i]    <= r_sb_sw[i-1];
+	       r_sb_tw[i]    <= r_sb_tw[i-1];
+	    end
+       end
+
+   // recover u,v in Q16: 1/d ~= y*2^-(16+e), u = sw/d, so u*2^16 = (sw*y) >> e
+   wire signed [18:0] w_sy    = $signed({1'b0, w_recip_y});
+   wire signed [66:0] w_uprod = $signed(r_sb_sw[3]) * w_sy;
+   wire signed [66:0] w_vprod = $signed(r_sb_tw[3]) * w_sy;
+   wire signed [66:0] w_ush   = w_uprod >>> w_recip_e;
+   wire signed [66:0] w_vsh   = w_vprod >>> w_recip_e;
+   wire [31:0]        w_u     = w_ush[31:0];
+   wire [31:0]        w_v     = w_vsh[31:0];
 
    logic [31:0] t_w0, t_w1, t_w2;
    always_comb
@@ -290,8 +338,7 @@ module rasterize(clk, rst, go,
 	n_iw_y = r_iw_y;
 
 	t_save_tri = 1'b0;
-	t_push_frag = 1'b0;
-	
+
 	case(r_state)
 	  IDLE:
 	    begin
@@ -377,9 +424,6 @@ module rasterize(clk, rst, go,
 	    begin
 	       if(w_queue_not_full)
 		 begin
-		    //test w0, w1, w2
-		    t_push_frag = (r_w0[31] | r_w1[31] | r_w2[31])==1'b0;
-		    
 		    if(r_x == r_x_max)
 		      begin
 			 n_x = w_x_min;
@@ -442,7 +486,8 @@ module rasterize(clk, rst, go,
 	    end
 	  DRAIN:
 	    begin
-	       if(w_queue_empty)
+	       // wait for the reciprocal pipe to flush as well as the queue
+	       if(w_queue_empty & !w_recip_busy)
 		 begin
 		    n_done = 1'b1;
 		    n_state = IDLE;

@@ -2,7 +2,7 @@ UNAME_S = $(shell uname -s)
 
 OBJ = top.o setup.o obj.o pipeline.o verilated.o
 
-SV_SRC = rasterize.sv
+SV_SRC = rasterize.sv recip.sv
 
 ifeq ($(UNAME_S),Linux)
 	CXX = clang++-14 -flto
@@ -38,7 +38,7 @@ EXE = hw_rasterize
 
 all: $(EXE)
 
-$(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a
+$(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a recip_seed.hex
 	$(CXX) $(CXXFLAGS) $(OBJ) obj_dir/*.o $(LIBS) -o $(EXE)
 
 top.o: top.cc obj_dir/Vrasterize__ALL.a
@@ -51,7 +51,7 @@ verilated.o: $(VERILATOR_SRC)
 	$(CXX) -MMD $(CXXFLAGS) -c $< 
 
 obj_dir/Vrasterize__ALL.a : $(SV_SRC)
-	$(VERILATOR) --x-assign unique -cc rasterize.sv
+	$(VERILATOR) --x-assign unique -cc rasterize.sv recip.sv --top-module rasterize
 	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir -f Vrasterize.mk
 
 # standalone reciprocal module + bit-exact testbench
