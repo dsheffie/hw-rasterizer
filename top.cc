@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include "Vrasterize.h"
@@ -19,12 +21,22 @@ static inline void tick(Vrasterize *tb) {
   tb->eval();
 }
 
+// Procedural checkerboard texture: N tiles across the [0,1] uv square,
+// tiling (via floor) for uv outside it.  Returns a gray texel.
+static void sample_checker(double u, double v, uint8_t &cr, uint8_t &cg, uint8_t &cb) {
+  const int N = 8;
+  int iu = (int)std::floor(u * N);
+  int iv = (int)std::floor(v * N);
+  uint8_t shade = ((iu + iv) & 1) ? 40 : 230;
+  cr = cg = cb = shade;
+}
+
 // Drive the RTL for one triangle, draining fragments through a software
 // depth buffer (nearest z wins).  Expects the model in IDLE on entry and
 // leaves it in IDLE on return.
 static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
-			    const vertex3d &v0, const vertex3d &v1, const vertex3d &v2,
-			    uint8_t r, uint8_t g, uint8_t b, uint64_t &pixels) {
+			    const screen_tri &st, uint64_t &pixels) {
+  const vertex3d &v0 = st.v[0], &v1 = st.v[1], &v2 = st.v[2];
   // x/y vertices feed the on-chip bounding-box and edge-delta logic
   tb->v0_x = v0.x; tb->v0_y = v0.y;
   tb->v1_x = v1.x; tb->v1_y = v1.y;
@@ -34,6 +46,28 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
   tri_setup s = setup_triangle(v0, v1, v2);
   tb->w0 = s.w0; tb->w1 = s.w1; tb->w2 = s.w2;
   tb->dzdx = s.dzdx; tb->dzdy = s.dzdy; tb->z_start = s.z_start;
+
+  // Perspective-correct texturing: interpolate u/w, v/w and 1/w as planes
+  // (all linear in screen space).  The host computes the plane gradients; the
+  // RTL steppers carry them across the bounding box (same shape as depth).
+  // The reciprocal + texel lookup are done in software on the values read back.
+  attr_plane Psw = setup_attr(v0, v1, v2, st.uv[0][0]*st.invw[0], st.uv[1][0]*st.invw[1], st.uv[2][0]*st.invw[2]);
+  attr_plane Ptw = setup_attr(v0, v1, v2, st.uv[0][1]*st.invw[0], st.uv[1][1]*st.invw[1], st.uv[2][1]*st.invw[2]);
+  attr_plane Piw = setup_attr(v0, v1, v2, st.invw[0], st.invw[1], st.invw[2]);
+
+  // convert plane (start, dx, dy) to Q.ATTR_FRAC_BITS fixed point for the RTL
+  const double S = (double)(1 << 12);                 // ATTR_FRAC_BITS = 12
+  const uint64_t SW_MASK = (1ULL << 48) - 1;          // u/w, t/w are 36.12
+  const uint32_t IW_MASK = (1U   << 30) - 1;          // 1/w is 18.12
+  tb->sw_start = (uint64_t)std::llround(Psw.a_start*S) & SW_MASK;
+  tb->dswdx    = (uint64_t)std::llround(Psw.dadx   *S) & SW_MASK;
+  tb->dswdy    = (uint64_t)std::llround(Psw.dady   *S) & SW_MASK;
+  tb->tw_start = (uint64_t)std::llround(Ptw.a_start*S) & SW_MASK;
+  tb->dtwdx    = (uint64_t)std::llround(Ptw.dadx   *S) & SW_MASK;
+  tb->dtwdy    = (uint64_t)std::llround(Ptw.dady   *S) & SW_MASK;
+  tb->iw_start = (uint32_t)std::llround(Piw.a_start*S) & IW_MASK;
+  tb->diwdx    = (uint32_t)std::llround(Piw.dadx   *S) & IW_MASK;
+  tb->diwdy    = (uint32_t)std::llround(Piw.dady   *S) & IW_MASK;
 
   tb->go = 1; tick(tb); tb->go = 0;
 
@@ -52,9 +86,18 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
       // guard: off-screen vertices can produce out-of-range addresses
       if(addr < (uint32_t)(imageWidth*imageHeight) && z < zbuf[addr]) {
 	zbuf[addr] = z;                             // depth test: nearest wins
-	fb[addr][0] = r;
-	fb[addr][1] = g;
-	fb[addr][2] = b;
+	// read the steppers back (sign-extend from their fixed-point widths)
+	double sw = ((int64_t)(tb->sw_q << 16) >> 16) / S;   // 48-bit -> 36.12
+	double tw = ((int64_t)(tb->tw_q << 16) >> 16) / S;
+	double iw = ((int32_t)(tb->iw_q <<  2) >>  2) / S;   // 30-bit -> 18.12
+	double w = 1.0 / iw;                         // the per-fragment reciprocal
+	double u = sw * w, v = tw * w;               // recover true texture coords
+	uint8_t cr, cg, cb;
+	sample_checker(u, v, cr, cg, cb);
+	// modulate texel by the flat shade
+	fb[addr][0] = (uint8_t)(cr * st.r / 255);
+	fb[addr][1] = (uint8_t)(cg * st.g / 255);
+	fb[addr][2] = (uint8_t)(cb * st.b / 255);
       }
       tb->pop_frag = 1;
     }
@@ -110,7 +153,7 @@ int main(int argc, char *argv[]) {
 
   uint64_t ticks = 0, pixels = 0;
   for(const screen_tri &t : tris) {
-    ticks += render_triangle(tb, framebuffer, zbuf, t.v[0], t.v[1], t.v[2], t.r, t.g, t.b, pixels);
+    ticks += render_triangle(tb, framebuffer, zbuf, t, pixels);
   }
 
   std::cout << "all done, rendered " << tris.size() << " triangles, trying to write image\n";

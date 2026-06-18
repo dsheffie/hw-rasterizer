@@ -45,3 +45,21 @@ tri_setup setup_triangle(const vertex3d &v0, const vertex3d &v1, const vertex3d 
   s.z_start = z0_fx + s.dzdx*(xs-v0.x) + s.dzdy*(ys-v0.y) + (1 << (DEPTH_FRAC_BITS-1));
   return s;
 }
+
+attr_plane setup_attr(const vertex3d &v0, const vertex3d &v1, const vertex3d &v2,
+                      double a0, double a1, double a2) {
+  int32_t xs = std::min(std::min(v0.x, v1.x), v2.x);
+  int32_t ys = std::min(std::min(v0.y, v1.y), v2.y);
+
+  // Same shared determinant (2*area) as the depth plane, with the attribute
+  // substituted for z in the two gradient numerators.
+  double area     = (double)v0.x*(v1.y-v2.y) - (double)v0.y*(v1.x-v2.x) + ((double)v1.x*v2.y - (double)v2.x*v1.y);
+  double dadx_num = a0*(v1.y-v2.y) - (double)v0.y*(a1-a2) + (a1*v2.y - a2*v1.y);
+  double dady_num = (double)v0.x*(a1-a2) - a0*(v1.x-v2.x) + ((double)v1.x*a2 - (double)v2.x*a1);
+
+  attr_plane p;
+  p.dadx = dadx_num / area;
+  p.dady = dady_num / area;
+  p.a_start = a0 + p.dadx*(xs - v0.x) + p.dady*(ys - v0.y);
+  return p;
+}

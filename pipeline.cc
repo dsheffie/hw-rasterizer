@@ -55,9 +55,9 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
   v3 lo{1e30f,1e30f,1e30f}, hi{-1e30f,-1e30f,-1e30f};
   for(const auto &t : mesh)
     for(int i = 0; i < 3; i++) {
-      lo.x = std::min(lo.x, t[i].x); hi.x = std::max(hi.x, t[i].x);
-      lo.y = std::min(lo.y, t[i].y); hi.y = std::max(hi.y, t[i].y);
-      lo.z = std::min(lo.z, t[i].z); hi.z = std::max(hi.z, t[i].z);
+      lo.x = std::min(lo.x, t[i].pos.x); hi.x = std::max(hi.x, t[i].pos.x);
+      lo.y = std::min(lo.y, t[i].pos.y); hi.y = std::max(hi.y, t[i].pos.y);
+      lo.z = std::min(lo.z, t[i].pos.z); hi.z = std::max(hi.z, t[i].pos.z);
     }
   v3 c{ (lo.x+hi.x)*0.5f, (lo.y+hi.y)*0.5f, (lo.z+hi.z)*0.5f };
   float ext = std::max(hi.x-lo.x, std::max(hi.y-lo.y, hi.z-lo.z));
@@ -76,7 +76,7 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
     // model -> eye space
     v4 e[3]; bool reject = false;
     for(int i = 0; i < 3; i++) {
-      e[i] = mul(MV, v4{tri[i].x, tri[i].y, tri[i].z, 1.0f});
+      e[i] = mul(MV, v4{tri[i].pos.x, tri[i].pos.y, tri[i].pos.z, 1.0f});
       if(e[i].z > -nearp) reject = true;          // at/behind the near plane
     }
     if(reject) continue;
@@ -88,8 +88,11 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
     // camera-facing normal opposes it (dot < 0); drop the rest.
     if(cull_backfaces && dot(N, e0) >= 0) continue;
 
-    // project to screen + quantized depth
+    // project to screen + quantized depth; keep 1/w and uv per vertex for
+    // perspective-correct texture interpolation.
     vertex3d sv[3];
+    float invw[3];
+    float uv[3][2];
     for(int i = 0; i < 3; i++) {
       v4 cl = mul(P, e[i]);
       float iw = 1.0f / cl.w;
@@ -97,13 +100,21 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
       float sy = (0.5f - cl.y*iw*0.5f) * height;   // flip y: screen origin upper-left
       float sz = (cl.z*iw*0.5f + 0.5f) * DEPTH_MAX;
       sv[i] = { (int32_t)std::lround(sx), (int32_t)std::lround(sy), (int32_t)std::lround(sz) };
+      invw[i] = iw;
+      uv[i][0] = tri[i].uv.u;
+      uv[i][1] = tri[i].uv.v;
     }
 
     // RTL coverage needs positive screen area; fix winding, drop degenerate
     long area = (long)(sv[1].x-sv[0].x)*(sv[2].y-sv[0].y)
               - (long)(sv[2].x-sv[0].x)*(sv[1].y-sv[0].y);
     if(area == 0) continue;
-    if(area < 0) std::swap(sv[1], sv[2]);
+    if(area < 0) {
+      std::swap(sv[1], sv[2]);
+      std::swap(invw[1], invw[2]);
+      std::swap(uv[1][0], uv[2][0]);
+      std::swap(uv[1][1], uv[2][1]);
+    }
 
     // flat shade: two-sided so the camera-facing surface is always lit
     v3 nf = normalize(N);
@@ -113,6 +124,11 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
 
     screen_tri st;
     st.v[0] = sv[0]; st.v[1] = sv[1]; st.v[2] = sv[2];
+    for(int i = 0; i < 3; i++) {
+      st.invw[i]  = invw[i];
+      st.uv[i][0] = uv[i][0];
+      st.uv[i][1] = uv[i][1];
+    }
     st.r = (uint8_t)std::min(255.0f, base.x * k);
     st.g = (uint8_t)std::min(255.0f, base.y * k);
     st.b = (uint8_t)std::min(255.0f, base.z * k);

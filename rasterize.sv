@@ -5,17 +5,30 @@ module rasterize(clk, rst, go,
 		 v2_x, v2_y,
 		 w0,w1,w2,
 		 dzdx, dzdy, z_start,
+		 dswdx, dswdy, sw_start,
+		 dtwdx, dtwdy, tw_start,
+		 diwdx, diwdy, iw_start,
 		 x_dim, y_dim,
-		 pop_frag, 
-		 addr_q, 
-		 pixel_q, 
-		 valid_q, 
+		 pop_frag,
+		 addr_q,
+		 pixel_q,
+		 sw_q, tw_q, iw_q,
+		 valid_q,
 		 done) ;
    // Depth interpolation fixed-point format: DEPTH_INT_BITS.DEPTH_FRAC_BITS
    // (signed).  Must match DEPTH_FRAC_BITS in setup.h.
    localparam DEPTH_FRAC_BITS = 12;
    localparam DEPTH_INT_BITS  = 25;
    localparam DEPTH_W         = DEPTH_INT_BITS + DEPTH_FRAC_BITS;
+
+   // Perspective-correct texture attributes: interpolated linearly in screen
+   // space exactly like depth (same stepper shape).  Fixed-point per the CRIME
+   // model: u/w and t/w are 36.12, 1/w is 18.12.  The reciprocal + texel
+   // lookup are done downstream (software for now), so the full fixed-point
+   // value is carried out per fragment.
+   localparam ATTR_FRAC_BITS = 12;
+   localparam SW_W = 48;   // 36.12 for u/w and t/w
+   localparam IW_W = 30;   // 18.12 for 1/w
 
    input logic clk;
    input logic rst;
@@ -35,6 +48,15 @@ module rasterize(clk, rst, go,
    input logic [DEPTH_W-1:0] dzdx;
    input logic [DEPTH_W-1:0] dzdy;
    input logic [DEPTH_W-1:0] z_start;
+   input logic [SW_W-1:0] dswdx;
+   input logic [SW_W-1:0] dswdy;
+   input logic [SW_W-1:0] sw_start;
+   input logic [SW_W-1:0] dtwdx;
+   input logic [SW_W-1:0] dtwdy;
+   input logic [SW_W-1:0] tw_start;
+   input logic [IW_W-1:0] diwdx;
+   input logic [IW_W-1:0] diwdy;
+   input logic [IW_W-1:0] iw_start;
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
@@ -43,6 +65,9 @@ module rasterize(clk, rst, go,
    
    output logic [31:0] addr_q;
    output logic [31:0] pixel_q;
+   output logic [SW_W-1:0] sw_q;
+   output logic [SW_W-1:0] tw_q;
+   output logic [IW_W-1:0] iw_q;
    output logic        valid_q;
    output logic        done;
    
@@ -102,6 +127,9 @@ module rasterize(clk, rst, go,
    logic 	r_done, n_done;
    logic [31:0] r_addrq [(1<<LG_OUTQ_D)-1:0];
    logic [31:0] r_pixelq [(1<<LG_OUTQ_D)-1:0];
+   logic [SW_W-1:0] r_swq [(1<<LG_OUTQ_D)-1:0];
+   logic [SW_W-1:0] r_twq [(1<<LG_OUTQ_D)-1:0];
+   logic [IW_W-1:0] r_iwq [(1<<LG_OUTQ_D)-1:0];
    
    logic [31:0] r_w0, n_w0;
    logic [31:0] r_w1, n_w1;
@@ -113,7 +141,14 @@ module rasterize(clk, rst, go,
 
    logic [DEPTH_W-1:0] r_z, n_z;
    logic [DEPTH_W-1:0] r_z_y, n_z_y;
-   
+
+   logic [SW_W-1:0] r_sw, n_sw;
+   logic [SW_W-1:0] r_sw_y, n_sw_y;
+   logic [SW_W-1:0] r_tw, n_tw;
+   logic [SW_W-1:0] r_tw_y, n_tw_y;
+   logic [IW_W-1:0] r_iw, n_iw;
+   logic [IW_W-1:0] r_iw_y, n_iw_y;
+
    logic [31:0] t_mul_a, t_mul_b;
    logic [31:0] t_sub_a0, t_sub_b0;
    logic [31:0] t_sub_a1, t_sub_b1;
@@ -150,7 +185,10 @@ module rasterize(clk, rst, go,
 	valid_q = r_wrq_ptr != r_rdq_ptr;
 	addr_q = r_addrq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 	pixel_q = r_pixelq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	
+	sw_q = r_swq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+	tw_q = r_twq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+	iw_q = r_iwq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+
 	if(t_push_frag)
 	  begin
 	     n_wrq_ptr = r_wrq_ptr + 'd1;
@@ -167,6 +205,9 @@ module rasterize(clk, rst, go,
 	  begin
              r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_addr;
 	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);
+	     r_swq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sw;
+	     r_twq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_tw;
+	     r_iwq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_iw;
 	  end
      end
 
@@ -241,6 +282,13 @@ module rasterize(clk, rst, go,
 	n_z = r_z;
 	n_z_y = r_z_y;
 
+	n_sw = r_sw;
+	n_sw_y = r_sw_y;
+	n_tw = r_tw;
+	n_tw_y = r_tw_y;
+	n_iw = r_iw;
+	n_iw_y = r_iw_y;
+
 	t_save_tri = 1'b0;
 	t_push_frag = 1'b0;
 	
@@ -261,6 +309,12 @@ module rasterize(clk, rst, go,
 		    n_w2_y = w0;
 		    n_z = z_start;
 		    n_z_y = z_start;
+		    n_sw = sw_start;
+		    n_sw_y = sw_start;
+		    n_tw = tw_start;
+		    n_tw_y = tw_start;
+		    n_iw = iw_start;
+		    n_iw_y = iw_start;
 		 end
 	    end
 	  COMPUTE_BB:
@@ -349,6 +403,12 @@ module rasterize(clk, rst, go,
 			 n_w2_y = w_sub2;
 			 n_z = r_z_y + dzdy;
 			 n_z_y = r_z_y + dzdy;
+			 n_sw = r_sw_y + dswdy;
+			 n_sw_y = r_sw_y + dswdy;
+			 n_tw = r_tw_y + dtwdy;
+			 n_tw_y = r_tw_y + dtwdy;
+			 n_iw = r_iw_y + diwdy;
+			 n_iw_y = r_iw_y + diwdy;
 			 //$display("n_start_addr = %d, n_y = %d", n_start_addr, n_y);
 		      end
 		    else
@@ -368,6 +428,9 @@ module rasterize(clk, rst, go,
 			 t_sub_b2 = r_v1v0_y;	       
 			 n_w2 = w_sub2;
 			 n_z = r_z + dzdx;
+			 n_sw = r_sw + dswdx;
+			 n_tw = r_tw + dtwdx;
+			 n_iw = r_iw + diwdx;
 
 		      end // else: !if(r_x == r_x_max)
 		    
@@ -441,6 +504,12 @@ module rasterize(clk, rst, go,
 	r_w2_y <= rst ? 'd0 : n_w2_y;
 	r_z <= rst ? 'd0 : n_z;
 	r_z_y <= rst ? 'd0 : n_z_y;
+	r_sw <= rst ? 'd0 : n_sw;
+	r_sw_y <= rst ? 'd0 : n_sw_y;
+	r_tw <= rst ? 'd0 : n_tw;
+	r_tw_y <= rst ? 'd0 : n_tw_y;
+	r_iw <= rst ? 'd0 : n_iw;
+	r_iw_y <= rst ? 'd0 : n_iw_y;
      end // always_ff@ (posedge clk)
    
 endmodule // rasterize

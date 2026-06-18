@@ -23,4 +23,19 @@ struct tri_setup {
 
 tri_setup setup_triangle(const vertex3d &v0, const vertex3d &v1, const vertex3d &v2);
 
+// A screen-space-linear attribute interpolated as a plane.  Its value at a
+// pixel (x,y) is  a_start + dadx*(x-xs) + dady*(y-ys)  where (xs,ys) is the
+// bounding-box start corner (min x, min y of the three vertices) -- the same
+// corner the rasterizer steps from.
+struct attr_plane {
+  double a_start, dadx, dady;
+};
+
+// Set up the plane through the three vertices for an attribute that is linear
+// in screen space, given its per-vertex values (a0,a1,a2).  Same Cramer's-rule
+// determinant as the depth plane.  Used to interpolate u/w, v/w and 1/w for
+// perspective-correct texturing.
+attr_plane setup_attr(const vertex3d &v0, const vertex3d &v1, const vertex3d &v2,
+                      double a0, double a1, double a2);
+
 #endif
