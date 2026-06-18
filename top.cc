@@ -71,8 +71,21 @@ static uint64_t render_triangle(Vrasterize *tb, const screen_tri &st) {
   tb->diwdx    = (uint32_t)std::llround(Piw.dadx   *S) & IW_MASK;
   tb->diwdy    = (uint32_t)std::llround(Piw.dady   *S) & IW_MASK;
 
-  // per-triangle flat shade color (packed R,G,B) the RTL modulates the texel by
-  tb->tri_rgb = ((uint32_t)st.r << 16) | ((uint32_t)st.g << 8) | st.b;
+  // Gouraud: per-vertex color planes (affine, no 1/w).  Q.COL_FRAC fixed point.
+  attr_plane Pcr = setup_attr(v0, v1, v2, st.col[0][0], st.col[1][0], st.col[2][0]);
+  attr_plane Pcg = setup_attr(v0, v1, v2, st.col[0][1], st.col[1][1], st.col[2][1]);
+  attr_plane Pcb = setup_attr(v0, v1, v2, st.col[0][2], st.col[1][2], st.col[2][2]);
+  const double CS = (double)(1 << 12);                // COL_FRAC = 12
+  const uint32_t COL_MASK = (1u << 24) - 1;           // COL_W = 24
+  tb->cr_start = (uint32_t)std::llround(Pcr.a_start*CS) & COL_MASK;
+  tb->dcrdx    = (uint32_t)std::llround(Pcr.dadx   *CS) & COL_MASK;
+  tb->dcrdy    = (uint32_t)std::llround(Pcr.dady   *CS) & COL_MASK;
+  tb->cg_start = (uint32_t)std::llround(Pcg.a_start*CS) & COL_MASK;
+  tb->dcgdx    = (uint32_t)std::llround(Pcg.dadx   *CS) & COL_MASK;
+  tb->dcgdy    = (uint32_t)std::llround(Pcg.dady   *CS) & COL_MASK;
+  tb->cb_start = (uint32_t)std::llround(Pcb.a_start*CS) & COL_MASK;
+  tb->dcbdx    = (uint32_t)std::llround(Pcb.dadx   *CS) & COL_MASK;
+  tb->dcbdy    = (uint32_t)std::llround(Pcb.dady   *CS) & COL_MASK;
 
   tb->go = 1; tick(tb); tb->go = 0;
   while(!tb->done) { tick(tb); ++ticks; }

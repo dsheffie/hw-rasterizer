@@ -15,7 +15,7 @@ struct screen_tri {
   vertex3d v[3];
   float uv[3][2];   // (u,v) per vertex
   float invw[3];    // 1/w per vertex
-  uint8_t r, g, b;
+  uint8_t col[3][3];// per-vertex RGB for Gouraud interpolation
 };
 
 // Run the 3D software pipeline over a model: model/view/projection

@@ -8,7 +8,9 @@ module rasterize(clk, rst, go,
 		 dswdx, dswdy, sw_start,
 		 dtwdx, dtwdy, tw_start,
 		 diwdx, diwdy, iw_start,
-		 tri_rgb,
+		 dcrdx, dcrdy, cr_start,
+		 dcgdx, dcgdy, cg_start,
+		 dcbdx, dcbdy, cb_start,
 		 x_dim, y_dim,
 		 clear,
 		 fb_raddr, fb_rdata,
@@ -28,6 +30,11 @@ module rasterize(clk, rst, go,
    localparam ATTR_FRAC_BITS = 12;
    localparam SW_W = 48;   // 36.12 for u/w and t/w
    localparam IW_W = 30;   // 18.12 for 1/w
+
+   // Gouraud color attributes: affine (no perspective divide), same stepper
+   // shape as depth.  Signed fixed-point, COL_FRAC fractional bits.
+   localparam COL_FRAC = 12;
+   localparam COL_W    = 24;
 
    // on-chip color + depth buffer geometry (BRAM-backed at 256x256 to fit the
    // ZU3EG's BRAM); depth quantized to Z_W bits
@@ -64,7 +71,9 @@ module rasterize(clk, rst, go,
    input logic [IW_W-1:0] diwdx;
    input logic [IW_W-1:0] diwdy;
    input logic [IW_W-1:0] iw_start;
-   input logic [23:0] tri_rgb;     // per-triangle flat shade color (R,G,B)
+   input logic [COL_W-1:0] dcrdx, dcrdy, cr_start;   // Gouraud R plane
+   input logic [COL_W-1:0] dcgdx, dcgdy, cg_start;   // Gouraud G plane
+   input logic [COL_W-1:0] dcbdx, dcbdy, cb_start;   // Gouraud B plane
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
@@ -98,7 +107,6 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v0_x, r_v0_y;
    logic [31:0] r_v1_x, r_v1_y;
    logic [31:0] r_v2_x, r_v2_y;
-   logic [23:0] r_tri_rgb;
    logic 	t_save_tri;
 
    logic [31:0] n_x_min, r_x_min;
@@ -144,6 +152,10 @@ module rasterize(clk, rst, go,
    logic [SW_W-1:0] r_tw_y, n_tw_y;
    logic [IW_W-1:0] r_iw, n_iw;
    logic [IW_W-1:0] r_iw_y, n_iw_y;
+
+   logic [COL_W-1:0] r_cr, n_cr, r_cr_y, n_cr_y;
+   logic [COL_W-1:0] r_cg, n_cg, r_cg_y, n_cg_y;
+   logic [COL_W-1:0] r_cb, n_cb, r_cb_y, n_cb_y;
 
    logic [31:0] t_mul_a, t_mul_b;
    logic [31:0] t_sub_a0, t_sub_b0;
@@ -197,12 +209,23 @@ module rasterize(clk, rst, go,
 		 .valid_out(w_recip_valid), .busy(w_recip_busy),
 		 .y(w_recip_y), .e(w_recip_e));
 
-   // side-band: carry address, depth and u/w, t/w through the same 4-cycle
-   // latency as the reciprocal (gated by the same enable)
+   // current-pixel Gouraud color: clamp each stepper's integer part to [0,255]
+   function automatic logic [7:0] clamp8(input logic signed [COL_W-1:0] x);
+      if(x < 0)        clamp8 = 8'd0;
+      else if(x > 255) clamp8 = 8'd255;
+      else             clamp8 = x[7:0];
+   endfunction
+   wire [23:0] w_col_now = {clamp8($signed(r_cr) >>> COL_FRAC),
+			    clamp8($signed(r_cg) >>> COL_FRAC),
+			    clamp8($signed(r_cb) >>> COL_FRAC)};
+
+   // side-band: carry address, depth, u/w, t/w and the Gouraud color through
+   // the same 4-cycle latency as the reciprocal (gated by the same enable)
    logic [31:0]     r_sb_addr  [0:3];
    logic [31:0]     r_sb_depth [0:3];
    logic [SW_W-1:0] r_sb_sw    [0:3];
    logic [SW_W-1:0] r_sb_tw    [0:3];
+   logic [23:0]     r_sb_col   [0:3];
    always_ff@(posedge clk)
      if(w_pipe_en)
        begin
@@ -210,12 +233,14 @@ module rasterize(clk, rst, go,
 	  r_sb_depth[0] <= 32'(r_z[DEPTH_W-1:DEPTH_FRAC_BITS]);
 	  r_sb_sw[0]    <= r_sw;
 	  r_sb_tw[0]    <= r_tw;
+	  r_sb_col[0]   <= w_col_now;
 	  for(int i = 1; i < 4; i++)
 	    begin
 	       r_sb_addr[i]  <= r_sb_addr[i-1];
 	       r_sb_depth[i] <= r_sb_depth[i-1];
 	       r_sb_sw[i]    <= r_sb_sw[i-1];
 	       r_sb_tw[i]    <= r_sb_tw[i-1];
+	       r_sb_col[i]   <= r_sb_col[i-1];
 	    end
        end
 
@@ -230,6 +255,7 @@ module rasterize(clk, rst, go,
    logic [31:0]       r_m_addr;
    logic [Z_W-1:0]    r_m_depth;
    logic [4:0]        r_m_e;
+   logic [23:0]       r_m_col;
    logic signed [66:0] r_m_uprod, r_m_vprod;
    always_ff@(posedge clk)
      begin
@@ -240,6 +266,7 @@ module rasterize(clk, rst, go,
 	     r_m_addr  <= r_sb_addr[3];
 	     r_m_depth <= r_sb_depth[3][Z_W-1:0];
 	     r_m_e     <= w_recip_e;
+	     r_m_col   <= r_sb_col[3];
 	     r_m_uprod <= $signed(r_sb_sw[3]) * w_sy;
 	     r_m_vprod <= $signed(r_sb_tw[3]) * w_sy;
 	  end
@@ -251,6 +278,7 @@ module rasterize(clk, rst, go,
    logic           r_s_valid;
    logic [31:0]    r_s_addr;
    logic [Z_W-1:0] r_s_depth;
+   logic [23:0]    r_s_col;
    logic [31:0]    r_s_u, r_s_v;
    always_ff@(posedge clk)
      begin
@@ -260,6 +288,7 @@ module rasterize(clk, rst, go,
 	  begin
 	     r_s_addr  <= r_m_addr;
 	     r_s_depth <= r_m_depth;
+	     r_s_col   <= r_m_col;
 	     r_s_u     <= w_ush[31:0];
 	     r_s_v     <= w_vsh[31:0];
 	  end
@@ -295,6 +324,7 @@ module rasterize(clk, rst, go,
    logic [31:0] r_z1_addr;
    logic [Z_W-1:0] r_z1_depth;
    logic [31:0] r_z1_u, r_z1_v;
+   logic [23:0] r_z1_col;
    logic [Z_W-1:0] r_z1_zold;
 
    always_ff@(posedge clk)
@@ -307,6 +337,7 @@ module rasterize(clk, rst, go,
 	     r_z1_depth <= r_s_depth;
 	     r_z1_u     <= r_s_u;
 	     r_z1_v     <= r_s_v;
+	     r_z1_col   <= r_s_col;
 	  end
      end
 
@@ -342,9 +373,9 @@ module rasterize(clk, rst, go,
 
    wire       w_chk   = r_z1_u[13] ^ r_z1_v[13];
    wire [7:0] w_texel = w_chk ? 8'd40 : 8'd230;
-   wire [23:0] w_color = {mul255(w_texel, r_tri_rgb[23:16]),
-			  mul255(w_texel, r_tri_rgb[15:8]),
-			  mul255(w_texel, r_tri_rgb[7:0])};
+   wire [23:0] w_color = {mul255(w_texel, r_z1_col[23:16]),
+			  mul255(w_texel, r_z1_col[15:8]),
+			  mul255(w_texel, r_z1_col[7:0])};
 
    // ---- color framebuffer (BRAM): clear, conditional write, host read-out ----
    logic [23:0] r_fb [0:FB_N-1];
@@ -429,6 +460,10 @@ module rasterize(clk, rst, go,
 	n_iw = r_iw;
 	n_iw_y = r_iw_y;
 
+	n_cr = r_cr; n_cr_y = r_cr_y;
+	n_cg = r_cg; n_cg_y = r_cg_y;
+	n_cb = r_cb; n_cb_y = r_cb_y;
+
 	t_save_tri = 1'b0;
 
 	case(r_state)
@@ -454,6 +489,9 @@ module rasterize(clk, rst, go,
 		    n_tw_y = tw_start;
 		    n_iw = iw_start;
 		    n_iw_y = iw_start;
+		    n_cr = cr_start; n_cr_y = cr_start;
+		    n_cg = cg_start; n_cg_y = cg_start;
+		    n_cb = cb_start; n_cb_y = cb_start;
 		 end
 	    end
 	  COMPUTE_BB:
@@ -543,6 +581,9 @@ module rasterize(clk, rst, go,
 			 n_tw_y = r_tw_y + dtwdy;
 			 n_iw = r_iw_y + diwdy;
 			 n_iw_y = r_iw_y + diwdy;
+			 n_cr = r_cr_y + dcrdy; n_cr_y = r_cr_y + dcrdy;
+			 n_cg = r_cg_y + dcgdy; n_cg_y = r_cg_y + dcgdy;
+			 n_cb = r_cb_y + dcbdy; n_cb_y = r_cb_y + dcbdy;
 			 //$display("n_start_addr = %d, n_y = %d", n_start_addr, n_y);
 		      end
 		    else
@@ -565,6 +606,9 @@ module rasterize(clk, rst, go,
 			 n_sw = r_sw + dswdx;
 			 n_tw = r_tw + dtwdx;
 			 n_iw = r_iw + diwdx;
+			 n_cr = r_cr + dcrdx;
+			 n_cg = r_cg + dcgdx;
+			 n_cb = r_cb + dcbdx;
 
 		      end // else: !if(r_x == r_x_max)
 		    
@@ -606,7 +650,6 @@ module rasterize(clk, rst, go,
 	     r_v1_y <= v1_y;
 	     r_v2_x <= v2_x;
 	     r_v2_y <= v2_y;
-	     r_tri_rgb <= tri_rgb;
 	  end
      end
    
@@ -643,6 +686,12 @@ module rasterize(clk, rst, go,
 	r_tw_y <= rst ? 'd0 : n_tw_y;
 	r_iw <= rst ? 'd0 : n_iw;
 	r_iw_y <= rst ? 'd0 : n_iw_y;
+	r_cr <= rst ? 'd0 : n_cr;
+	r_cr_y <= rst ? 'd0 : n_cr_y;
+	r_cg <= rst ? 'd0 : n_cg;
+	r_cg_y <= rst ? 'd0 : n_cg_y;
+	r_cb <= rst ? 'd0 : n_cb;
+	r_cb_y <= rst ? 'd0 : n_cb_y;
      end // always_ff@ (posedge clk)
    
 endmodule // rasterize

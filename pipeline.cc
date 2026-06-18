@@ -106,6 +106,24 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
       uv[i][1] = tri[i].uv.v;
     }
 
+    // Gouraud: light each vertex by its own (eye-space) normal.  Fall back to
+    // the face normal if the OBJ vertex has none.  Two-sided per vertex.
+    v3 nf_face = normalize(N);
+    if(dot(nf_face, e0) > 0) nf_face = {-nf_face.x, -nf_face.y, -nf_face.z};
+    v3 ev[3] = {e0, e1, e2};
+    uint8_t col[3][3];
+    for(int i = 0; i < 3; i++) {
+      v4 n4 = mul(MV, v4{tri[i].nrm.x, tri[i].nrm.y, tri[i].nrm.z, 0.0f});
+      v3 nv{n4.x, n4.y, n4.z};
+      v3 nf = (nv.x!=0 || nv.y!=0 || nv.z!=0) ? normalize(nv) : nf_face;
+      if(dot(nf, ev[i]) > 0) nf = {-nf.x, -nf.y, -nf.z};
+      float ndl = std::max(0.0f, dot(nf, L));
+      float k = ambient + (1.0f - ambient) * ndl;
+      col[i][0] = (uint8_t)std::min(255.0f, base.x * k);
+      col[i][1] = (uint8_t)std::min(255.0f, base.y * k);
+      col[i][2] = (uint8_t)std::min(255.0f, base.z * k);
+    }
+
     // RTL coverage needs positive screen area; fix winding, drop degenerate
     long area = (long)(sv[1].x-sv[0].x)*(sv[2].y-sv[0].y)
               - (long)(sv[2].x-sv[0].x)*(sv[1].y-sv[0].y);
@@ -115,13 +133,8 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
       std::swap(invw[1], invw[2]);
       std::swap(uv[1][0], uv[2][0]);
       std::swap(uv[1][1], uv[2][1]);
+      std::swap(col[1], col[2]);
     }
-
-    // flat shade: two-sided so the camera-facing surface is always lit
-    v3 nf = normalize(N);
-    if(dot(nf, e0) > 0) nf = {-nf.x, -nf.y, -nf.z};
-    float ndl = std::max(0.0f, dot(nf, L));
-    float k = ambient + (1.0f - ambient) * ndl;
 
     screen_tri st;
     st.v[0] = sv[0]; st.v[1] = sv[1]; st.v[2] = sv[2];
@@ -129,10 +142,10 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
       st.invw[i]  = invw[i];
       st.uv[i][0] = uv[i][0];
       st.uv[i][1] = uv[i][1];
+      st.col[i][0] = col[i][0];
+      st.col[i][1] = col[i][1];
+      st.col[i][2] = col[i][2];
     }
-    st.r = (uint8_t)std::min(255.0f, base.x * k);
-    st.g = (uint8_t)std::min(255.0f, base.y * k);
-    st.b = (uint8_t)std::min(255.0f, base.z * k);
     out.push_back(st);
   }
   return out;

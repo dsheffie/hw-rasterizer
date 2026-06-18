@@ -8,9 +8,9 @@
 struct vec3f { float x, y, z; };
 struct vec2f { float u, v; };
 
-// A model-space vertex: position plus texture coordinate (0,0 if the OBJ
-// face carries no vt index).
-struct model_vert { vec3f pos; vec2f uv; };
+// A model-space vertex: position, texture coordinate (0,0 if the face has no
+// vt), and normal (0,0,0 if the face has no vn).
+struct model_vert { vec3f pos; vec2f uv; vec3f nrm; };
 
 // A model-space triangle.
 typedef std::array<model_vert, 3> model_tri;
