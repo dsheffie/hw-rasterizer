@@ -9,11 +9,12 @@ module rasterize(clk, rst, go,
 		 dtwdx, dtwdy, tw_start,
 		 diwdx, diwdy, iw_start,
 		 x_dim, y_dim,
+		 clear,
 		 pop_frag,
 		 addr_q,
-		 pixel_q,
 		 u_q, v_q,
 		 valid_q,
+		 clearing,
 		 done) ;
    // Depth interpolation fixed-point format: DEPTH_INT_BITS.DEPTH_FRAC_BITS
    // (signed).  Must match DEPTH_FRAC_BITS in setup.h.
@@ -29,6 +30,13 @@ module rasterize(clk, rst, go,
    localparam ATTR_FRAC_BITS = 12;
    localparam SW_W = 48;   // 36.12 for u/w and t/w
    localparam IW_W = 30;   // 18.12 for 1/w
+
+   // on-chip depth buffer geometry (BRAM-backed); depth quantized to Z_W bits
+   localparam SCREEN_W = 512;
+   localparam SCREEN_H = 512;
+   localparam FB_N  = SCREEN_W * SCREEN_H;
+   localparam FB_AW = $clog2(FB_N);
+   localparam Z_W   = 16;
 
    input logic clk;
    input logic rst;
@@ -61,13 +69,14 @@ module rasterize(clk, rst, go,
    input logic [31:0] y_dim;
 
    
+   input logic 	      clear;      // pulse to reset the depth buffer
    input logic 	      pop_frag;
-   
+
    output logic [31:0] addr_q;
-   output logic [31:0] pixel_q;
    output logic [31:0] u_q;     // recovered u, Q16 (uv units), signed
    output logic [31:0] v_q;     // recovered v, Q16 (uv units), signed
    output logic        valid_q;
+   output logic        clearing;   // high while the depth buffer is being cleared
    output logic        done;
    
    typedef enum logic [4:0] {
@@ -126,7 +135,6 @@ module rasterize(clk, rst, go,
    logic [31:0] r_start_addr, n_start_addr;
    logic 	r_done, n_done;
    logic [31:0] r_addrq [(1<<LG_OUTQ_D)-1:0];
-   logic [31:0] r_pixelq [(1<<LG_OUTQ_D)-1:0];
    logic [31:0] r_uq [(1<<LG_OUTQ_D)-1:0];
    logic [31:0] r_vq [(1<<LG_OUTQ_D)-1:0];
    
@@ -183,7 +191,6 @@ module rasterize(clk, rst, go,
 	n_rdq_ptr = r_rdq_ptr;
 	valid_q = r_wrq_ptr != r_rdq_ptr;
 	addr_q = r_addrq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	pixel_q = r_pixelq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 	u_q = r_uq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 	v_q = r_vq[r_rdq_ptr[LG_OUTQ_D-1:0]];
 
@@ -201,10 +208,9 @@ module rasterize(clk, rst, go,
      begin
 	if(t_push_frag)
 	  begin
-             r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sb_addr[3];
-	     r_pixelq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_sb_depth[3];
-	     r_uq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= w_u;
-	     r_vq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= w_v;
+             r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_addr;
+	     r_uq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_u;
+	     r_vq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_v;
 	  end
      end
 
@@ -232,8 +238,6 @@ module rasterize(clk, rst, go,
 		 .valid_out(w_recip_valid), .busy(w_recip_busy),
 		 .y(w_recip_y), .e(w_recip_e));
 
-   assign t_push_frag = w_recip_valid & w_queue_not_full;
-
    // side-band: carry address, depth and u/w, t/w through the same 4-cycle
    // latency as the reciprocal (gated by the same enable)
    logic [31:0]     r_sb_addr  [0:3];
@@ -256,14 +260,111 @@ module rasterize(clk, rst, go,
 	    end
        end
 
-   // recover u,v in Q16: 1/d ~= y*2^-(16+e), u = sw/d, so u*2^16 = (sw*y) >> e
-   wire signed [18:0] w_sy    = $signed({1'b0, w_recip_y});
-   wire signed [66:0] w_uprod = $signed(r_sb_sw[3]) * w_sy;
-   wire signed [66:0] w_vprod = $signed(r_sb_tw[3]) * w_sy;
-   wire signed [66:0] w_ush   = w_uprod >>> w_recip_e;
-   wire signed [66:0] w_vsh   = w_vprod >>> w_recip_e;
-   wire [31:0]        w_u     = w_ush[31:0];
-   wire [31:0]        w_v     = w_vsh[31:0];
+   // recover u,v in Q16: 1/d ~= y*2^-(16+e), u = sw/d, so u*2^16 = (sw*y) >> e.
+   // Two pipeline stages -- MUL (the two 48x19 products) then SHIFT (the
+   // variable >>> e) -- carry addr/depth/valid alongside so they reach the
+   // depth test together.  Gated by the same enable as the rest of the pipe.
+   wire signed [18:0] w_sy = $signed({1'b0, w_recip_y});
+
+   // MUL stage
+   logic              r_m_valid;
+   logic [31:0]       r_m_addr;
+   logic [Z_W-1:0]    r_m_depth;
+   logic [4:0]        r_m_e;
+   logic signed [66:0] r_m_uprod, r_m_vprod;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_m_valid <= 1'b0;
+	else if(w_pipe_en) r_m_valid <= w_recip_valid & (r_sb_addr[3] < FB_N);
+	if(w_pipe_en)
+	  begin
+	     r_m_addr  <= r_sb_addr[3];
+	     r_m_depth <= r_sb_depth[3][Z_W-1:0];
+	     r_m_e     <= w_recip_e;
+	     r_m_uprod <= $signed(r_sb_sw[3]) * w_sy;
+	     r_m_vprod <= $signed(r_sb_tw[3]) * w_sy;
+	  end
+     end
+
+   // SHIFT stage
+   wire signed [66:0] w_ush = r_m_uprod >>> r_m_e;
+   wire signed [66:0] w_vsh = r_m_vprod >>> r_m_e;
+   logic           r_s_valid;
+   logic [31:0]    r_s_addr;
+   logic [Z_W-1:0] r_s_depth;
+   logic [31:0]    r_s_u, r_s_v;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_s_valid <= 1'b0;
+	else if(w_pipe_en) r_s_valid <= r_m_valid;
+	if(w_pipe_en)
+	  begin
+	     r_s_addr  <= r_m_addr;
+	     r_s_depth <= r_m_depth;
+	     r_s_u     <= w_ush[31:0];
+	     r_s_v     <= w_vsh[31:0];
+	  end
+     end
+
+   // ---- hardware depth buffer (BRAM) + depth test ----
+   // One pipeline stage (Z1) absorbs the BRAM read latency: it registers the
+   // reciprocal-stage fragment and the depth read at its address, then the
+   // next cycle compares (nearest wins) and, on pass, writes the new depth and
+   // pushes (addr,u,v) to the output queue.  Only depth-passing fragments are
+   // queued, so the consumer needs no depth value.
+   logic [Z_W-1:0] r_zb [0:FB_N-1];
+
+   // clear: walk the buffer writing the far value (0xFFFF) once per frame
+   logic [FB_AW:0] r_clear_cnt;
+   logic 	   r_clearing;
+   assign clearing = r_clearing;
+   always_ff@(posedge clk)
+     begin
+	if(rst)
+	  begin r_clearing <= 1'b0; r_clear_cnt <= 'd0; end
+	else if(clear)
+	  begin r_clearing <= 1'b1; r_clear_cnt <= 'd0; end
+	else if(r_clearing)
+	  begin
+	     r_clear_cnt <= r_clear_cnt + 'd1;
+	     if(r_clear_cnt == FB_N-1) r_clearing <= 1'b0;
+	  end
+     end
+
+   // Z1 stage: fragment + its depth read, registered together
+   logic        r_z1_valid;
+   logic [31:0] r_z1_addr;
+   logic [Z_W-1:0] r_z1_depth;
+   logic [31:0] r_z1_u, r_z1_v;
+   logic [Z_W-1:0] r_z1_zold;
+
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_z1_valid <= 1'b0;
+	else if(w_pipe_en) r_z1_valid <= r_s_valid;
+	if(w_pipe_en)
+	  begin
+	     r_z1_addr  <= r_s_addr;
+	     r_z1_depth <= r_s_depth;
+	     r_z1_u     <= r_s_u;
+	     r_z1_v     <= r_s_v;
+	  end
+     end
+
+   wire w_zpass = r_z1_valid & (r_z1_depth < r_z1_zold);
+   assign t_push_frag = w_pipe_en & w_zpass;
+
+   // depth BRAM: clear takes priority, else conditional depth write; one read
+   // port issues the depth at the SHIFT-stage address (Z1's input) each cycle.
+   always_ff@(posedge clk)
+     begin
+	if(r_clearing)
+	  r_zb[r_clear_cnt[FB_AW-1:0]] <= {Z_W{1'b1}};
+	else if(w_pipe_en & w_zpass)
+	  r_zb[r_z1_addr[FB_AW-1:0]] <= r_z1_depth;
+	if(w_pipe_en)
+	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
+     end
 
    logic [31:0] t_w0, t_w1, t_w2;
    always_comb
@@ -486,8 +587,8 @@ module rasterize(clk, rst, go,
 	    end
 	  DRAIN:
 	    begin
-	       // wait for the reciprocal pipe to flush as well as the queue
-	       if(w_queue_empty & !w_recip_busy)
+	       // wait for the reciprocal, multiply and depth-test stages to flush
+	       if(w_queue_empty & !w_recip_busy & !r_m_valid & !r_s_valid & !r_z1_valid)
 		 begin
 		    n_done = 1'b1;
 		    n_state = IDLE;

@@ -28,6 +28,12 @@ static inline void tick(Vrasterize *tb) {
   tb->eval();
 }
 
+// Reset the hardware depth buffer (far value everywhere).  Model must be IDLE.
+static void clear_zbuffer(Vrasterize *tb) {
+  tb->clear = 1; tick(tb); tb->clear = 0;
+  while(tb->clearing) tick(tb);
+}
+
 // Procedural checkerboard texture: N tiles across the [0,1] uv square,
 // tiling (via floor) for uv outside it.  Returns a gray texel.
 static void sample_checker(double u, double v, uint8_t &cr, uint8_t &cg, uint8_t &cb) {
@@ -38,10 +44,10 @@ static void sample_checker(double u, double v, uint8_t &cr, uint8_t &cg, uint8_t
   cr = cg = cb = shade;
 }
 
-// Drive the RTL for one triangle, draining fragments through a software
-// depth buffer (nearest z wins).  Expects the model in IDLE on entry and
-// leaves it in IDLE on return.
-static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
+// Drive the RTL for one triangle.  The hardware depth buffer filters the
+// fragments, so only depth-passing (addr,u,v) survive into the queue; we just
+// shade them into the framebuffer.  Expects the model IDLE on entry/return.
+static uint64_t render_triangle(Vrasterize *tb, Rgb *fb,
 			    const screen_tri &st, uint64_t &pixels) {
   const vertex3d &v0 = st.v[0], &v1 = st.v[1], &v2 = st.v[2];
   // x/y vertices feed the on-chip bounding-box and edge-delta logic
@@ -87,22 +93,17 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
       done = true;
     }
     if(tb->valid_q) {
-      ++pixels;                                     // a covered fragment emitted by the rasterizer
-      int32_t z = (int32_t)tb->pixel_q;             // already true (fixed-point) depth
-      uint32_t addr = tb->addr_q;
-      // guard: off-screen vertices can produce out-of-range addresses
-      if(addr < (uint32_t)(imageWidth*imageHeight) && z < zbuf[addr]) {
-	zbuf[addr] = z;                             // depth test: nearest wins
-	// (u,v) recovered in hardware (reciprocal + multiplies), Q16 signed
-	double u = (int32_t)tb->u_q / 65536.0;
-	double v = (int32_t)tb->v_q / 65536.0;
-	uint8_t cr, cg, cb;
-	sample_checker(u, v, cr, cg, cb);
-	// modulate texel by the flat shade
-	fb[addr][0] = (uint8_t)(cr * st.r / 255);
-	fb[addr][1] = (uint8_t)(cg * st.g / 255);
-	fb[addr][2] = (uint8_t)(cb * st.b / 255);
-      }
+      ++pixels;                                     // a depth-passing fragment
+      uint32_t addr = tb->addr_q;                   // already bounds-checked in RTL
+      // (u,v) recovered in hardware (reciprocal + multiplies), Q16 signed
+      double u = (int32_t)tb->u_q / 65536.0;
+      double v = (int32_t)tb->v_q / 65536.0;
+      uint8_t cr, cg, cb;
+      sample_checker(u, v, cr, cg, cb);
+      // modulate texel by the flat shade
+      fb[addr][0] = (uint8_t)(cr * st.r / 255);
+      fb[addr][1] = (uint8_t)(cg * st.g / 255);
+      fb[addr][2] = (uint8_t)(cb * st.b / 255);
       tb->pop_frag = 1;
     }
     tb->clk = (~tb->clk) & 1;
@@ -115,7 +116,7 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
 // Live SDL viewer: spin the model and render each frame through the RTL into
 // an on-screen framebuffer.  Controls: Esc/Q quit, Space pause, Left/Right
 // nudge the yaw.  Returns nonzero if SDL can't open a window (e.g. headless).
-static int run_sdl(Vrasterize *tb, Rgb *fb, int32_t *zbuf, int w, int h,
+static int run_sdl(Vrasterize *tb, Rgb *fb, int w, int h,
 		   const std::vector<model_tri> &mesh, bool cull) {
   if(SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::cerr << "SDL_Init failed: " << SDL_GetError() << " (no display?)\n";
@@ -145,10 +146,10 @@ static int run_sdl(Vrasterize *tb, Rgb *fb, int32_t *zbuf, int w, int h,
 
     // render one frame through the RTL into the framebuffer
     memset(fb, 0x0, w * h * 3);
-    for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
+    clear_zbuffer(tb);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
     uint64_t px = 0;
-    for(const screen_tri &t : tris) render_triangle(tb, fb, zbuf, t, px);
+    for(const screen_tri &t : tris) render_triangle(tb, fb, t, px);
 
     SDL_UpdateTexture(tex, nullptr, fb, w * 3);
     SDL_RenderClear(ren);
@@ -184,6 +185,7 @@ int main(int argc, char *argv[]) {
   tb->clk = 0;
   tb->rst = 1;
   tb->go  = 0;
+  tb->clear = 0;
   tb->pop_frag = 0;
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
@@ -196,12 +198,7 @@ int main(int argc, char *argv[]) {
   Rgb *framebuffer = new Rgb[w * h];
   memset(framebuffer, 0x0, w * h * 3);
 
-  // software depth buffer: nearest (smallest z) wins
-  int32_t *zbuf = new int32_t[w * h];
-  for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
-
-  // 3D software pipeline: load the model and project it to screen-space
-  // triangles, then rasterize each through the RTL + software depth buffer.
+  // depth buffer now lives on-chip (BRAM); cleared per frame via clear_zbuffer
   std::vector<model_tri> mesh = load_obj(model_path);
   if(mesh.empty()) {
     std::cerr << "failed to load model: " << model_path << "\n";
@@ -211,21 +208,21 @@ int main(int argc, char *argv[]) {
 	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
 
   if(sdl) {
-    int rc = run_sdl(tb, framebuffer, zbuf, w, h, mesh, cull);
-    delete [] framebuffer; delete [] zbuf; delete tb;
+    int rc = run_sdl(tb, framebuffer, w, h, mesh, cull);
+    delete [] framebuffer; delete tb;
     return rc;
   }
 
   uint64_t ticks = 0, pixels = 0;
   for(int f = 0; f < frames; f++) {
-    // fresh framebuffer + depth buffer each frame
+    // fresh framebuffer (software) + on-chip depth buffer each frame
     memset(framebuffer, 0x0, w * h * 3);
-    for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
+    clear_zbuffer(tb);
 
     float yaw = 35.0f + (frames > 1 ? f * (360.0f / frames) : 0.0f);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
     for(const screen_tri &t : tris) {
-      ticks += render_triangle(tb, framebuffer, zbuf, t, pixels);
+      ticks += render_triangle(tb, framebuffer, t, pixels);
     }
 
     char name[64];
@@ -242,7 +239,6 @@ int main(int argc, char *argv[]) {
   std::cout << "all done, " << frames << " frame(s), " << ticks << " clocks total\n";
 
   delete [] framebuffer;
-  delete [] zbuf;
   delete tb;
 
   return 0;
