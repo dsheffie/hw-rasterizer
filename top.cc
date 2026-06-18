@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -158,8 +160,11 @@ int main(int argc, char *argv[]) {
   if(argc > 1 && argv[1][0] != '+' && argv[1][0] != '-') model_path = argv[1];
 
   bool cull = true;                       // backface culling, toggle with --no-cull
-  for(int i = 1; i < argc; i++)
+  int frames = 1;                         // --spin N: render N frames over 360 deg
+  for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "--no-cull") == 0) cull = false;
+    else if(strcmp(argv[i], "--spin") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
+  }
 
   init_recip_seed();
 
@@ -190,30 +195,38 @@ int main(int argc, char *argv[]) {
     std::cerr << "failed to load model: " << model_path << "\n";
     return 1;
   }
-  std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull);
-  std::cout << "model " << model_path << ": " << mesh.size()
-	    << " triangles, " << tris.size() << " after pipeline"
+  std::cout << "model " << model_path << ": " << mesh.size() << " triangles"
 	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
 
   uint64_t ticks = 0, pixels = 0;
-  for(const screen_tri &t : tris) {
-    ticks += render_triangle(tb, framebuffer, zbuf, t, pixels);
+  for(int f = 0; f < frames; f++) {
+    // fresh framebuffer + depth buffer each frame
+    memset(framebuffer, 0x0, w * h * 3);
+    for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
+
+    float yaw = 35.0f + (frames > 1 ? f * (360.0f / frames) : 0.0f);
+    std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
+    for(const screen_tri &t : tris) {
+      ticks += render_triangle(tb, framebuffer, zbuf, t, pixels);
+    }
+
+    char name[64];
+    if(frames > 1) snprintf(name, sizeof name, "frame_%03d.ppm", f);
+    else           snprintf(name, sizeof name, "raster2d.ppm");
+    std::ofstream ofs(name);
+    ofs << "P6\n" << w << " " << h << "\n255\n";
+    ofs.write((char*)framebuffer, w * h * 3);
+    ofs.close();
+    std::cout << "frame " << f << " (yaw " << yaw << "): " << tris.size()
+	      << " tris -> " << name << "\n";
   }
 
-  std::cout << "all done, rendered " << tris.size() << " triangles, trying to write image\n";
-  std::cout << "would take " << ticks << " clocks\n";
-  std::cout << "rendered " << pixels << " pixels ("
-	    << (tris.empty() ? 0.0 : (double)pixels / tris.size()) << " per triangle)\n";
+  std::cout << "all done, " << frames << " frame(s), " << ticks << " clocks total\n";
   std::cout << "recip max rel err (8-bit seed): "
 	    << "seed-only " << g_recip_relerr[0]
 	    << ", +1 Newton " << g_recip_relerr[1]
 	    << ", +2 Newton " << g_recip_relerr[2]
 	    << " (using " << RECIP_NEWTON << " for the image)\n";
-  std::ofstream ofs;
-  ofs.open("raster2d.ppm");
-  ofs << "P6\n" << w << " " << h << "\n255\n";
-  ofs.write((char*)framebuffer, w * h * 3);
-  ofs.close();
 
   delete [] framebuffer;
   delete [] zbuf;

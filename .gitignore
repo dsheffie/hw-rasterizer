@@ -4,3 +4,8 @@
 obj_dir/
 hw_rasterize
 raster2d.ppm
+
+# render outputs
+frame_*.ppm
+*.mp4
+*.gif

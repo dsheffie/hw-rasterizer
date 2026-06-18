@@ -24,6 +24,7 @@ struct screen_tri {
 // and flat (N.L) shading.  Produces screen-space triangles to feed the
 // rasterizer.
 std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
-				     int width, int height, bool cull_backfaces);
+				     int width, int height, bool cull_backfaces,
+				     float yaw_deg = 35.0f);
 
 #endif

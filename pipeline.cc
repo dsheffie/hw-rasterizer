@@ -47,7 +47,8 @@ namespace {
 }
 
 std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
-				     int width, int height, bool cull_backfaces) {
+				     int width, int height, bool cull_backfaces,
+				     float yaw_deg) {
   std::vector<screen_tri> out;
   if(mesh.empty()) return out;
 
@@ -64,7 +65,7 @@ std::vector<screen_tri> project_mesh(const std::vector<model_tri> &mesh,
   float fit = (ext > 0) ? 2.0f/ext : 1.0f;
 
   const float dist = 4.0f, nearp = 0.1f, farp = 100.0f;
-  mat4 model = mul(rotateY(35.0f*PI/180.0f), mul(scale(fit), translate(-c.x,-c.y,-c.z)));
+  mat4 model = mul(rotateY(yaw_deg*PI/180.0f), mul(scale(fit), translate(-c.x,-c.y,-c.z)));
   mat4 MV    = mul(translate(0,0,-dist), model);
   mat4 P     = perspective(50.0f*PI/180.0f, (float)width/height, nearp, farp);
 
