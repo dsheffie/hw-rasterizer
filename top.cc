@@ -16,8 +16,8 @@
 #include "obj.h"
 #include "pipeline.h"
 
-const int32_t imageWidth = 512;
-const int32_t imageHeight = 512;
+const int32_t imageWidth = 256;
+const int32_t imageHeight = 256;
 
 typedef uint8_t Rgb[3];
 
@@ -28,27 +28,16 @@ static inline void tick(Vrasterize *tb) {
   tb->eval();
 }
 
-// Reset the hardware depth buffer (far value everywhere).  Model must be IDLE.
-static void clear_zbuffer(Vrasterize *tb) {
+// Reset the on-chip color + depth buffers (clear sweep).  Model must be IDLE.
+static void clear_buffers(Vrasterize *tb) {
   tb->clear = 1; tick(tb); tb->clear = 0;
   while(tb->clearing) tick(tb);
 }
 
-// Procedural checkerboard texture: N tiles across the [0,1] uv square,
-// tiling (via floor) for uv outside it.  Returns a gray texel.
-static void sample_checker(double u, double v, uint8_t &cr, uint8_t &cg, uint8_t &cb) {
-  const int N = 8;
-  int iu = (int)std::floor(u * N);
-  int iv = (int)std::floor(v * N);
-  uint8_t shade = ((iu + iv) & 1) ? 40 : 230;
-  cr = cg = cb = shade;
-}
-
-// Drive the RTL for one triangle.  The hardware depth buffer filters the
-// fragments, so only depth-passing (addr,u,v) survive into the queue; we just
-// shade them into the framebuffer.  Expects the model IDLE on entry/return.
-static uint64_t render_triangle(Vrasterize *tb, Rgb *fb,
-			    const screen_tri &st, uint64_t &pixels) {
+// Drive the RTL for one triangle.  The hardware does depth test, checkerboard
+// texturing and shade modulation and writes the survivors straight into the
+// on-chip framebuffer.  Expects the model IDLE on entry/return.
+static uint64_t render_triangle(Vrasterize *tb, const screen_tri &st) {
   const vertex3d &v0 = st.v[0], &v1 = st.v[1], &v2 = st.v[2];
   // x/y vertices feed the on-chip bounding-box and edge-delta logic
   tb->v0_x = v0.x; tb->v0_y = v0.y;
@@ -82,35 +71,25 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb,
   tb->diwdx    = (uint32_t)std::llround(Piw.dadx   *S) & IW_MASK;
   tb->diwdy    = (uint32_t)std::llround(Piw.dady   *S) & IW_MASK;
 
-  tb->go = 1; tick(tb); tb->go = 0;
+  // per-triangle flat shade color (packed R,G,B) the RTL modulates the texel by
+  tb->tri_rgb = ((uint32_t)st.r << 16) | ((uint32_t)st.g << 8) | st.b;
 
-  bool done = false;
-  while(not(done)) {
-    tb->clk = (~tb->clk) & 1;
-    tb->pop_frag = 0;
-    tb->eval();
-    if(tb->done) {
-      done = true;
-    }
-    if(tb->valid_q) {
-      ++pixels;                                     // a depth-passing fragment
-      uint32_t addr = tb->addr_q;                   // already bounds-checked in RTL
-      // (u,v) recovered in hardware (reciprocal + multiplies), Q16 signed
-      double u = (int32_t)tb->u_q / 65536.0;
-      double v = (int32_t)tb->v_q / 65536.0;
-      uint8_t cr, cg, cb;
-      sample_checker(u, v, cr, cg, cb);
-      // modulate texel by the flat shade
-      fb[addr][0] = (uint8_t)(cr * st.r / 255);
-      fb[addr][1] = (uint8_t)(cg * st.g / 255);
-      fb[addr][2] = (uint8_t)(cb * st.b / 255);
-      tb->pop_frag = 1;
-    }
-    tb->clk = (~tb->clk) & 1;
-    tb->eval();
-    ++ticks;
-  }
+  tb->go = 1; tick(tb); tb->go = 0;
+  while(!tb->done) { tick(tb); ++ticks; }
   return ticks;
+}
+
+// Scan the on-chip framebuffer out into a host RGB buffer (registered read:
+// set address, clock, then read the data).
+static void readout_framebuffer(Vrasterize *tb, Rgb *fb, int n) {
+  for(int a = 0; a < n; a++) {
+    tb->fb_raddr = a;
+    tick(tb);
+    uint32_t c = tb->fb_rdata;
+    fb[a][0] = (c >> 16) & 0xff;
+    fb[a][1] = (c >> 8) & 0xff;
+    fb[a][2] = c & 0xff;
+  }
 }
 
 // Live SDL viewer: spin the model and render each frame through the RTL into
@@ -144,12 +123,11 @@ static int run_sdl(Vrasterize *tb, Rgb *fb, int w, int h,
       }
     }
 
-    // render one frame through the RTL into the framebuffer
-    memset(fb, 0x0, w * h * 3);
-    clear_zbuffer(tb);
+    // render one frame: clear on-chip buffers, rasterize, scan the FB out
+    clear_buffers(tb);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
-    uint64_t px = 0;
-    for(const screen_tri &t : tris) render_triangle(tb, fb, t, px);
+    for(const screen_tri &t : tris) render_triangle(tb, t);
+    readout_framebuffer(tb, fb, w * h);
 
     SDL_UpdateTexture(tex, nullptr, fb, w * 3);
     SDL_RenderClear(ren);
@@ -186,7 +164,7 @@ int main(int argc, char *argv[]) {
   tb->rst = 1;
   tb->go  = 0;
   tb->clear = 0;
-  tb->pop_frag = 0;
+  tb->fb_raddr = 0;
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
 
@@ -213,17 +191,17 @@ int main(int argc, char *argv[]) {
     return rc;
   }
 
-  uint64_t ticks = 0, pixels = 0;
+  uint64_t ticks = 0;
   for(int f = 0; f < frames; f++) {
-    // fresh framebuffer (software) + on-chip depth buffer each frame
-    memset(framebuffer, 0x0, w * h * 3);
-    clear_zbuffer(tb);
+    // clear the on-chip color + depth buffers each frame
+    clear_buffers(tb);
 
     float yaw = 35.0f + (frames > 1 ? f * (360.0f / frames) : 0.0f);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
     for(const screen_tri &t : tris) {
-      ticks += render_triangle(tb, framebuffer, t, pixels);
+      ticks += render_triangle(tb, t);
     }
+    readout_framebuffer(tb, framebuffer, w * h);
 
     char name[64];
     if(frames > 1) snprintf(name, sizeof name, "frame_%03d.ppm", f);

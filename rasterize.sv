@@ -8,12 +8,10 @@ module rasterize(clk, rst, go,
 		 dswdx, dswdy, sw_start,
 		 dtwdx, dtwdy, tw_start,
 		 diwdx, diwdy, iw_start,
+		 tri_rgb,
 		 x_dim, y_dim,
 		 clear,
-		 pop_frag,
-		 addr_q,
-		 u_q, v_q,
-		 valid_q,
+		 fb_raddr, fb_rdata,
 		 clearing,
 		 done) ;
    // Depth interpolation fixed-point format: DEPTH_INT_BITS.DEPTH_FRAC_BITS
@@ -31,9 +29,10 @@ module rasterize(clk, rst, go,
    localparam SW_W = 48;   // 36.12 for u/w and t/w
    localparam IW_W = 30;   // 18.12 for 1/w
 
-   // on-chip depth buffer geometry (BRAM-backed); depth quantized to Z_W bits
-   localparam SCREEN_W = 512;
-   localparam SCREEN_H = 512;
+   // on-chip color + depth buffer geometry (BRAM-backed at 256x256 to fit the
+   // ZU3EG's BRAM); depth quantized to Z_W bits
+   localparam SCREEN_W = 256;
+   localparam SCREEN_H = 256;
    localparam FB_N  = SCREEN_W * SCREEN_H;
    localparam FB_AW = $clog2(FB_N);
    localparam Z_W   = 16;
@@ -65,18 +64,16 @@ module rasterize(clk, rst, go,
    input logic [IW_W-1:0] diwdx;
    input logic [IW_W-1:0] diwdy;
    input logic [IW_W-1:0] iw_start;
+   input logic [23:0] tri_rgb;     // per-triangle flat shade color (R,G,B)
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
-   
-   input logic 	      clear;      // pulse to reset the depth buffer
-   input logic 	      pop_frag;
 
-   output logic [31:0] addr_q;
-   output logic [31:0] u_q;     // recovered u, Q16 (uv units), signed
-   output logic [31:0] v_q;     // recovered v, Q16 (uv units), signed
-   output logic        valid_q;
-   output logic        clearing;   // high while the depth buffer is being cleared
+   input logic 	      clear;      // pulse to reset the color + depth buffers
+   input logic [31:0] fb_raddr;    // framebuffer read address (host scan-out)
+
+   output logic [23:0] fb_rdata;   // framebuffer read data (registered)
+   output logic        clearing;   // high while the buffers are being cleared
    output logic        done;
    
    typedef enum logic [4:0] {
@@ -101,14 +98,9 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v0_x, r_v0_y;
    logic [31:0] r_v1_x, r_v1_y;
    logic [31:0] r_v2_x, r_v2_y;
+   logic [23:0] r_tri_rgb;
    logic 	t_save_tri;
-   logic 	t_push_frag;
 
-   localparam LG_OUTQ_D = 4;
-
-   logic [LG_OUTQ_D:0] r_rdq_ptr, n_rdq_ptr;
-   logic [LG_OUTQ_D:0] r_wrq_ptr, n_wrq_ptr;   
-   
    logic [31:0] n_x_min, r_x_min;
    logic [31:0] n_x_max, r_x_max;
    logic [31:0] n_y_min, r_y_min;
@@ -134,9 +126,6 @@ module rasterize(clk, rst, go,
    logic [31:0] r_addr, n_addr;
    logic [31:0] r_start_addr, n_start_addr;
    logic 	r_done, n_done;
-   logic [31:0] r_addrq [(1<<LG_OUTQ_D)-1:0];
-   logic [31:0] r_uq [(1<<LG_OUTQ_D)-1:0];
-   logic [31:0] r_vq [(1<<LG_OUTQ_D)-1:0];
    
    logic [31:0] r_w0, n_w0;
    logic [31:0] r_w1, n_w1;
@@ -184,41 +173,12 @@ module rasterize(clk, rst, go,
      end
    wire [31:0] w_mul = rr_mul;
 
-   always_comb
-     begin
-	done = r_done;
-	n_wrq_ptr = r_wrq_ptr;
-	n_rdq_ptr = r_rdq_ptr;
-	valid_q = r_wrq_ptr != r_rdq_ptr;
-	addr_q = r_addrq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	u_q = r_uq[r_rdq_ptr[LG_OUTQ_D-1:0]];
-	v_q = r_vq[r_rdq_ptr[LG_OUTQ_D-1:0]];
+   assign done = r_done;
 
-	if(t_push_frag)
-	  begin
-	     n_wrq_ptr = r_wrq_ptr + 'd1;
-	  end
-	if(pop_frag)
-	  begin
-	     n_rdq_ptr = r_rdq_ptr + 'd1;
-	  end
-     end
-
-   always_ff@(posedge clk)
-     begin
-	if(t_push_frag)
-	  begin
-             r_addrq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_addr;
-	     r_uq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_u;
-	     r_vq[r_wrq_ptr[LG_OUTQ_D-1:0]] <= r_z1_v;
-	  end
-     end
-
-   wire w_queue_full = (r_wrq_ptr[LG_OUTQ_D-1:0] == r_rdq_ptr[LG_OUTQ_D-1:0]) & 
-	(r_wrq_ptr[LG_OUTQ_D] != r_rdq_ptr[LG_OUTQ_D]);
-   wire w_queue_not_full = !w_queue_full;
-
-   wire w_queue_empty = r_wrq_ptr == r_rdq_ptr;
+   // no output queue any more: depth-passing fragments are shaded and written
+   // straight into the on-chip framebuffer (below).  The pipe never stalls
+   // (BRAM accepts one write/cycle), so the clock-enable is always on.
+   wire w_pipe_en = 1'b1;
 
    // ---- perspective divide: 1/w reciprocal + u/w, t/w multiplies ----
    // The steppers produce (r_sw, r_tw, r_iw) per pixel.  Feed 1/w into the
@@ -226,9 +186,8 @@ module rasterize(clk, rst, go,
    // 4-deep side-band so they align with the reciprocal's output, then recover
    //   u = (u/w) / (1/w),   v = (t/w) / (1/w)
    // and push (addr, depth, u, v) to the output queue.
-   wire w_pipe_en = w_queue_not_full;
    wire w_covered = (r_w0[31] | r_w1[31] | r_w2[31]) == 1'b0;
-   wire w_feed    = (r_state == RENDER) & w_queue_not_full & w_covered;
+   wire w_feed    = (r_state == RENDER) & w_covered;
 
    wire        w_recip_valid, w_recip_busy;
    wire [17:0] w_recip_y;
@@ -351,8 +310,8 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   wire w_zpass = r_z1_valid & (r_z1_depth < r_z1_zold);
-   assign t_push_frag = w_pipe_en & w_zpass;
+   wire w_zpass     = r_z1_valid & (r_z1_depth < r_z1_zold);
+   wire w_frag_wr   = w_pipe_en & w_zpass;     // commit this fragment
 
    // depth BRAM: clear takes priority, else conditional depth write; one read
    // port issues the depth at the SHIFT-stage address (Z1's input) each cycle.
@@ -360,10 +319,42 @@ module rasterize(clk, rst, go,
      begin
 	if(r_clearing)
 	  r_zb[r_clear_cnt[FB_AW-1:0]] <= {Z_W{1'b1}};
-	else if(w_pipe_en & w_zpass)
+	else if(w_frag_wr)
 	  r_zb[r_z1_addr[FB_AW-1:0]] <= r_z1_depth;
 	if(w_pipe_en)
 	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
+     end
+
+   // ---- procedural checkerboard texture + flat-shade modulate ----
+   // 8 tiles across [0,1]: tile parity is just bit 13 of the Q16 (u,v).
+   // modulate: out = floor(texel*shade/255), exact via ((x+1)*257)>>16.
+   function automatic logic [7:0] mul255(input logic [7:0] a, input logic [7:0] b);
+      logic [15:0] p;
+      logic [16:0] s;
+      logic [25:0] t;
+      begin
+	 p = a * b;
+	 s = {1'b0, p} + 17'd1;
+	 t = s * 9'd257;
+	 mul255 = t[23:16];
+      end
+   endfunction
+
+   wire       w_chk   = r_z1_u[13] ^ r_z1_v[13];
+   wire [7:0] w_texel = w_chk ? 8'd40 : 8'd230;
+   wire [23:0] w_color = {mul255(w_texel, r_tri_rgb[23:16]),
+			  mul255(w_texel, r_tri_rgb[15:8]),
+			  mul255(w_texel, r_tri_rgb[7:0])};
+
+   // ---- color framebuffer (BRAM): clear, conditional write, host read-out ----
+   logic [23:0] r_fb [0:FB_N-1];
+   always_ff@(posedge clk)
+     begin
+	if(r_clearing)
+	  r_fb[r_clear_cnt[FB_AW-1:0]] <= 24'h0;
+	else if(w_frag_wr)
+	  r_fb[r_z1_addr[FB_AW-1:0]] <= w_color;
+	fb_rdata <= r_fb[fb_raddr[FB_AW-1:0]];
      end
 
    logic [31:0] t_w0, t_w1, t_w2;
@@ -523,9 +514,7 @@ module rasterize(clk, rst, go,
 	    end
 	  RENDER:
 	    begin
-	       if(w_queue_not_full)
-		 begin
-		    if(r_x == r_x_max)
+	       if(r_x == r_x_max)
 		      begin
 			 n_x = w_x_min;
 			 n_y = r_y + 'd1;
@@ -583,12 +572,11 @@ module rasterize(clk, rst, go,
 		      begin
 			 n_state = DRAIN;
 		      end
-		 end // if (w_queue_not_full)
 	    end
 	  DRAIN:
 	    begin
 	       // wait for the reciprocal, multiply and depth-test stages to flush
-	       if(w_queue_empty & !w_recip_busy & !r_m_valid & !r_s_valid & !r_z1_valid)
+	       if(!w_recip_busy & !r_m_valid & !r_s_valid & !r_z1_valid)
 		 begin
 		    n_done = 1'b1;
 		    n_state = IDLE;
@@ -617,7 +605,8 @@ module rasterize(clk, rst, go,
 	     r_v1_x <= v1_x;
 	     r_v1_y <= v1_y;
 	     r_v2_x <= v2_x;
-	     r_v2_y <= v2_y;	     
+	     r_v2_y <= v2_y;
+	     r_tri_rgb <= tri_rgb;
 	  end
      end
    
@@ -633,8 +622,6 @@ module rasterize(clk, rst, go,
 	r_x_dim <= rst ? 'd0 : n_x_dim;
 	r_addr <= rst ? 'd0  : n_addr;
 	r_start_addr <= rst ? 'd0  : n_start_addr;
-	r_rdq_ptr <= rst ? 'd0 : n_rdq_ptr;
-	r_wrq_ptr <= rst ? 'd0 : n_wrq_ptr;
 	r_done <= rst ? 1'b0 : n_done;
 	r_v2v1_x <= rst ? 'd0 : n_v2v1_x;
 	r_v2v1_y <= rst ? 'd0 : n_v2v1_y;
