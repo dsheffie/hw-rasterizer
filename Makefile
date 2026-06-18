@@ -12,7 +12,8 @@ ifeq ($(UNAME_S),Linux)
 	VERILATOR_INC = /home/dsheffie/local/share/verilator/include
 	VERILATOR_DPI_INC = /home/dsheffie/local/share/verilator/include/vltstd/
 	VERILATOR = /home/dsheffie/local/bin/verilator
-	EXTRA_LD = -lcapstone -lboost_program_options  -lboost_serialization -lunwind
+	SDL_CFLAGS = $(shell pkg-config --cflags sdl2)
+	EXTRA_LD = -lcapstone -lboost_program_options  -lboost_serialization -lunwind $(shell pkg-config --libs sdl2)
 endif
 
 ifeq ($(UNAME_S),Darwin)
@@ -26,7 +27,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 OPT = -O3 -g -std=c++14 -fomit-frame-pointer
-CXXFLAGS = -std=c++11 -g  $(OPT) -I$(VERILATOR_INC) -I$(VERILATOR_DPI_INC) #-DLINUX_SYSCALL_EMULATION=1
+CXXFLAGS = -std=c++11 -g  $(OPT) -I$(VERILATOR_INC) -I$(VERILATOR_DPI_INC) $(SDL_CFLAGS) #-DLINUX_SYSCALL_EMULATION=1
 LIBS =  $(EXTRA_LD) -lpthread
 
 DEP = $(OBJ:.o=.d)

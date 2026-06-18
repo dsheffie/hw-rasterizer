@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
 #include "Vrasterize.h"
 #include "setup.h"
 #include "obj.h"
@@ -152,6 +157,58 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
   return ticks;
 }
 
+// Live SDL viewer: spin the model and render each frame through the RTL into
+// an on-screen framebuffer.  Controls: Esc/Q quit, Space pause, Left/Right
+// nudge the yaw.  Returns nonzero if SDL can't open a window (e.g. headless).
+static int run_sdl(Vrasterize *tb, Rgb *fb, int32_t *zbuf, int w, int h,
+		   const std::vector<model_tri> &mesh, bool cull) {
+  if(SDL_Init(SDL_INIT_VIDEO) != 0) {
+    std::cerr << "SDL_Init failed: " << SDL_GetError() << " (no display?)\n";
+    return 1;
+  }
+  SDL_Window *win = SDL_CreateWindow("hw-rasterizer",
+				     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, 0);
+  SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+  SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
+				       SDL_TEXTUREACCESS_STREAMING, w, h);
+
+  float yaw = 35.0f, speed = 2.0f;        // degrees per frame
+  bool running = true, paused = false;
+  while(running) {
+    SDL_Event ev;
+    while(SDL_PollEvent(&ev)) {
+      if(ev.type == SDL_QUIT) running = false;
+      else if(ev.type == SDL_KEYDOWN) {
+	switch(ev.key.keysym.sym) {
+	case SDLK_ESCAPE: case SDLK_q: running = false; break;
+	case SDLK_SPACE:  paused = !paused; break;
+	case SDLK_LEFT:   yaw -= 5.0f; break;
+	case SDLK_RIGHT:  yaw += 5.0f; break;
+	}
+      }
+    }
+
+    // render one frame through the RTL into the framebuffer
+    memset(fb, 0x0, w * h * 3);
+    for(int i = 0; i < w * h; i++) zbuf[i] = INT32_MAX;
+    std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
+    uint64_t px = 0;
+    for(const screen_tri &t : tris) render_triangle(tb, fb, zbuf, t, px);
+
+    SDL_UpdateTexture(tex, nullptr, fb, w * 3);
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, nullptr, nullptr);
+    SDL_RenderPresent(ren);
+    if(!paused) yaw += speed;
+  }
+
+  SDL_DestroyTexture(tex);
+  SDL_DestroyRenderer(ren);
+  SDL_DestroyWindow(win);
+  SDL_Quit();
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
   contextp->commandArgs(argc, argv);
@@ -161,9 +218,11 @@ int main(int argc, char *argv[]) {
 
   bool cull = true;                       // backface culling, toggle with --no-cull
   int frames = 1;                         // --spin N: render N frames over 360 deg
+  bool sdl = false;                       // --sdl: live spinning viewer
   for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "--no-cull") == 0) cull = false;
     else if(strcmp(argv[i], "--spin") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
+    else if(strcmp(argv[i], "--sdl") == 0) sdl = true;
   }
 
   init_recip_seed();
@@ -197,6 +256,12 @@ int main(int argc, char *argv[]) {
   }
   std::cout << "model " << model_path << ": " << mesh.size() << " triangles"
 	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
+
+  if(sdl) {
+    int rc = run_sdl(tb, framebuffer, zbuf, w, h, mesh, cull);
+    delete [] framebuffer; delete [] zbuf; delete tb;
+    return rc;
+  }
 
   uint64_t ticks = 0, pixels = 0;
   for(int f = 0; f < frames; f++) {
