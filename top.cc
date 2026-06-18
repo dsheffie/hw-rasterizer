@@ -31,6 +31,40 @@ static void sample_checker(double u, double v, uint8_t &cr, uint8_t &cg, uint8_t
   cr = cg = cb = shade;
 }
 
+// ---- fixed-point reciprocal prototype (software model of the future RTL) ----
+// Newton-Raphson reciprocal with an 8-bit seed table, operating on the integer
+// 1/w value the steppers produce.  This is the exact algorithm the hardware
+// reciprocal unit will run; prototyped here to nail the table, normalization
+// and bit widths and to measure the accuracy/Newton-step tradeoff before any
+// RTL is written.
+static uint32_t recip_seed[256];        // Q16 reciprocal of a [1,2) mantissa
+static void init_recip_seed() {
+  for(int i = 0; i < 256; i++) {
+    double m = 1.0 + (i + 0.5) / 256.0;            // mantissa midpoint in [1,2)
+    recip_seed[i] = (uint32_t)std::llround(65536.0 / m);
+  }
+}
+// approximate 1/d for positive integer d, via normalize -> seed -> `steps`
+// Newton iterations (y' = y*(2 - d*y)).  Returns a double, but every internal
+// op is integer and maps directly to RTL (clz, shift, table, 2 mults/iter).
+static double recip_fixed(uint32_t d, int steps) {
+  int e = 31 - __builtin_clz(d);                   // d in [2^e, 2^(e+1))
+  uint64_t M = (e >= 16) ? (d >> (e - 16))         // mantissa, Q16 in [2^16,2^17)
+                         : ((uint64_t)d << (16 - e));
+  uint64_t Y = recip_seed[(M >> 8) & 0xff];        // Q16 recip of mantissa
+  for(int s = 0; s < steps; s++) {
+    uint64_t MY = M * Y;                            // Q32, ~2^32
+    Y = (Y * (((uint64_t)1 << 33) - MY)) >> 32;    // y*(2 - d*y), back to Q16
+  }
+  return (double)Y / (double)((uint64_t)1 << (16 + e));   // (1/mant) * 2^-e
+}
+
+// accuracy instrumentation: worst-case relative error of the fixed-point
+// reciprocal vs. the true 1/d, for 0/1/2 Newton steps, over the 1/w values
+// actually encountered while rendering.
+static double g_recip_relerr[3] = {0, 0, 0};
+static const int RECIP_NEWTON = 1;                  // steps used for the image
+
 // Drive the RTL for one triangle, draining fragments through a software
 // depth buffer (nearest z wins).  Expects the model in IDLE on entry and
 // leaves it in IDLE on return.
@@ -87,11 +121,19 @@ static uint64_t render_triangle(Vrasterize *tb, Rgb *fb, int32_t *zbuf,
       if(addr < (uint32_t)(imageWidth*imageHeight) && z < zbuf[addr]) {
 	zbuf[addr] = z;                             // depth test: nearest wins
 	// read the steppers back (sign-extend from their fixed-point widths)
-	double sw = ((int64_t)(tb->sw_q << 16) >> 16) / S;   // 48-bit -> 36.12
-	double tw = ((int64_t)(tb->tw_q << 16) >> 16) / S;
-	double iw = ((int32_t)(tb->iw_q <<  2) >>  2) / S;   // 30-bit -> 18.12
-	double w = 1.0 / iw;                         // the per-fragment reciprocal
-	double u = sw * w, v = tw * w;               // recover true texture coords
+	int64_t sw_fx = (int64_t)(tb->sw_q << 16) >> 16;     // u/w, 36.12
+	int64_t tw_fx = (int64_t)(tb->tw_q << 16) >> 16;     // t/w, 36.12
+	int32_t iw_fx = (int32_t)(tb->iw_q <<  2) >>  2;     // 1/w, 18.12
+	// reciprocal of 1/w then two multiplies: u = (u/w)/(1/w) = sw_fx/iw_fx
+	// (the shared 2^12 scales cancel), likewise v.
+	double r = recip_fixed((uint32_t)iw_fx, RECIP_NEWTON);
+	double u = sw_fx * r, v = tw_fx * r;
+	// track reciprocal accuracy for 0/1/2 Newton steps over real 1/w values
+	double rtrue = 1.0 / (double)iw_fx;
+	for(int s = 0; s < 3; s++) {
+	  double e = std::fabs(recip_fixed((uint32_t)iw_fx, s) - rtrue) / rtrue;
+	  if(e > g_recip_relerr[s]) g_recip_relerr[s] = e;
+	}
 	uint8_t cr, cg, cb;
 	sample_checker(u, v, cr, cg, cb);
 	// modulate texel by the flat shade
@@ -118,6 +160,8 @@ int main(int argc, char *argv[]) {
   bool cull = true;                       // backface culling, toggle with --no-cull
   for(int i = 1; i < argc; i++)
     if(strcmp(argv[i], "--no-cull") == 0) cull = false;
+
+  init_recip_seed();
 
   Vrasterize *tb = new Vrasterize;
   tb->clk = 0;
@@ -160,6 +204,11 @@ int main(int argc, char *argv[]) {
   std::cout << "would take " << ticks << " clocks\n";
   std::cout << "rendered " << pixels << " pixels ("
 	    << (tris.empty() ? 0.0 : (double)pixels / tris.size()) << " per triangle)\n";
+  std::cout << "recip max rel err (8-bit seed): "
+	    << "seed-only " << g_recip_relerr[0]
+	    << ", +1 Newton " << g_recip_relerr[1]
+	    << ", +2 Newton " << g_recip_relerr[2]
+	    << " (using " << RECIP_NEWTON << " for the image)\n";
   std::ofstream ofs;
   ofs.open("raster2d.ppm");
   ofs << "P6\n" << w << " " << h << "\n255\n";
