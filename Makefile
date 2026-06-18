@@ -54,7 +54,23 @@ obj_dir/Vrasterize__ALL.a : $(SV_SRC)
 	$(VERILATOR) --x-assign unique -cc rasterize.sv
 	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir -f Vrasterize.mk
 
+# standalone reciprocal module + bit-exact testbench
+.PHONY: recip_test
+recip_test: recip_tb recip_seed.hex
+	./recip_tb
+
+# seed ROM: entry i = round(65536 / (1 + (i+0.5)/256)), matches init_recip_seed
+recip_seed.hex:
+	python3 -c "import math; print('\n'.join('%x'%int(math.floor(65536.0/(1.0+(i+0.5)/256.0)+0.5)) for i in range(256)))" > $@
+
+obj_dir_recip/Vrecip__ALL.a : recip.sv
+	$(VERILATOR) --x-assign unique -cc recip.sv --Mdir obj_dir_recip
+	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir_recip -f Vrecip.mk
+
+recip_tb: recip_tb.cc obj_dir_recip/Vrecip__ALL.a verilated.o
+	$(CXX) $(CXXFLAGS) -Iobj_dir_recip recip_tb.cc obj_dir_recip/*.o verilated.o -lpthread -o recip_tb
+
 -include $(DEP)
 
 clean:
-	rm -rf $(EXE) $(OBJ) $(DEP) obj_dir
+	rm -rf $(EXE) $(OBJ) $(DEP) obj_dir obj_dir_recip recip_tb

@@ -2,7 +2,10 @@
 *.o
 *.d
 obj_dir/
+obj_dir_recip/
 hw_rasterize
+recip_tb
+recip_seed.hex
 raster2d.ppm
 
 # render outputs
