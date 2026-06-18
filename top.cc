@@ -34,6 +34,23 @@ static void clear_buffers(Vrasterize *tb) {
   while(tb->clearing) tick(tb);
 }
 
+const int texDim = 128;   // must match TEX_LW (1<<7) in rasterize.sv
+
+// Load a test texture into the texture BRAM: a u->red, v->green gradient with
+// black grid lines every 16 texels, so UV mapping + REPEAT wrap are obvious.
+static void load_test_texture(Vrasterize *tb) {
+  for(int tv = 0; tv < texDim; tv++)
+    for(int tu = 0; tu < texDim; tu++) {
+      uint8_t r = tu * 2, g = tv * 2, b = 128;
+      if((tu & 15) == 0 || (tv & 15) == 0) { r = g = b = 0; }
+      tb->tex_waddr = tv * texDim + tu;
+      tb->tex_wdata = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+      tb->tex_we = 1;
+      tick(tb);
+    }
+  tb->tex_we = 0;
+}
+
 // Drive the RTL for one triangle.  The hardware does depth test, checkerboard
 // texturing and shade modulation and writes the survivors straight into the
 // on-chip framebuffer.  Expects the model IDLE on entry/return.
@@ -177,6 +194,7 @@ int main(int argc, char *argv[]) {
   tb->rst = 1;
   tb->go  = 0;
   tb->clear = 0;
+  tb->tex_we = 0;
   tb->fb_raddr = 0;
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
@@ -184,6 +202,8 @@ int main(int argc, char *argv[]) {
   tick(tb);
   tb->rst = 0;
   tick(tb);
+
+  load_test_texture(tb);   // one-time texture upload
 
   const int w = imageWidth, h = imageHeight;
   Rgb *framebuffer = new Rgb[w * h];

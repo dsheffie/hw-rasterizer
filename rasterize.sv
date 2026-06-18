@@ -11,6 +11,7 @@ module rasterize(clk, rst, go,
 		 dcrdx, dcrdy, cr_start,
 		 dcgdx, dcgdy, cg_start,
 		 dcbdx, dcbdy, cb_start,
+		 tex_we, tex_waddr, tex_wdata,
 		 x_dim, y_dim,
 		 clear,
 		 fb_raddr, fb_rdata,
@@ -35,6 +36,13 @@ module rasterize(clk, rst, go,
    // shape as depth.  Signed fixed-point, COL_FRAC fractional bits.
    localparam COL_FRAC = 12;
    localparam COL_W    = 24;
+
+   // texture memory (BRAM): TEX_W x TEX_W RGB, power-of-two so REPEAT wrap is
+   // just a low-bit mask.  uv is Q16, so the texel coord is uv >> (16-TEX_LW).
+   localparam TEX_LW = 7;            // log2 texture dimension (128x128)
+   localparam TEX_W  = 1 << TEX_LW;
+   localparam TEX_N  = TEX_W * TEX_W;
+   localparam TEX_AW = 2 * TEX_LW;
 
    // on-chip color + depth buffer geometry (BRAM-backed at 256x256 to fit the
    // ZU3EG's BRAM); depth quantized to Z_W bits
@@ -74,6 +82,9 @@ module rasterize(clk, rst, go,
    input logic [COL_W-1:0] dcrdx, dcrdy, cr_start;   // Gouraud R plane
    input logic [COL_W-1:0] dcgdx, dcgdy, cg_start;   // Gouraud G plane
    input logic [COL_W-1:0] dcbdx, dcbdy, cb_start;   // Gouraud B plane
+   input logic 	      tex_we;       // texture-load write enable (host)
+   input logic [31:0] tex_waddr;    // texture-load address
+   input logic [23:0] tex_wdata;    // texture-load texel (R,G,B)
    input logic [31:0] x_dim;
    input logic [31:0] y_dim;
 
@@ -319,12 +330,13 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   // Z1 stage: fragment + its depth read, registered together
+   // Z1 stage: fragment + its depth read + its texel, registered together
    logic        r_z1_valid;
    logic [31:0] r_z1_addr;
    logic [Z_W-1:0] r_z1_depth;
    logic [31:0] r_z1_u, r_z1_v;
    logic [23:0] r_z1_col;
+   logic [23:0] r_z1_texel;
    logic [Z_W-1:0] r_z1_zold;
 
    always_ff@(posedge clk)
@@ -339,6 +351,20 @@ module rasterize(clk, rst, go,
 	     r_z1_v     <= r_s_v;
 	     r_z1_col   <= r_s_col;
 	  end
+     end
+
+   // ---- texture memory (BRAM): nearest sample with REPEAT wrap ----
+   // texel coord = uv >> (16-TEX_LW); low TEX_LW bits = REPEAT (works for
+   // negative uv too).  Read issued at the Z1 input (SHIFT-stage uv) so the
+   // texel lands at Z1 aligned with the fragment -- same trick as the depth read.
+   logic [23:0] r_tex [0:TEX_N-1];
+   wire signed [31:0] w_su = $signed(r_s_u) >>> (16 - TEX_LW);
+   wire signed [31:0] w_sv = $signed(r_s_v) >>> (16 - TEX_LW);
+   wire [TEX_AW-1:0]  w_texaddr = {w_sv[TEX_LW-1:0], w_su[TEX_LW-1:0]};
+   always_ff@(posedge clk)
+     begin
+	if(tex_we)     r_tex[tex_waddr[TEX_AW-1:0]] <= tex_wdata;
+	if(w_pipe_en)  r_z1_texel <= r_tex[w_texaddr];
      end
 
    wire w_zpass     = r_z1_valid & (r_z1_depth < r_z1_zold);
@@ -356,9 +382,8 @@ module rasterize(clk, rst, go,
 	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
      end
 
-   // ---- procedural checkerboard texture + flat-shade modulate ----
-   // 8 tiles across [0,1]: tile parity is just bit 13 of the Q16 (u,v).
-   // modulate: out = floor(texel*shade/255), exact via ((x+1)*257)>>16.
+   // ---- texel x Gouraud-color modulate (GL_MODULATE) ----
+   // out_c = floor(texel_c * color_c / 255), exact via ((x+1)*257)>>16.
    function automatic logic [7:0] mul255(input logic [7:0] a, input logic [7:0] b);
       logic [15:0] p;
       logic [16:0] s;
@@ -371,11 +396,9 @@ module rasterize(clk, rst, go,
       end
    endfunction
 
-   wire       w_chk   = r_z1_u[13] ^ r_z1_v[13];
-   wire [7:0] w_texel = w_chk ? 8'd40 : 8'd230;
-   wire [23:0] w_color = {mul255(w_texel, r_z1_col[23:16]),
-			  mul255(w_texel, r_z1_col[15:8]),
-			  mul255(w_texel, r_z1_col[7:0])};
+   wire [23:0] w_color = {mul255(r_z1_texel[23:16], r_z1_col[23:16]),
+			  mul255(r_z1_texel[15:8],  r_z1_col[15:8]),
+			  mul255(r_z1_texel[7:0],   r_z1_col[7:0])};
 
    // ---- color framebuffer (BRAM): clear, conditional write, host read-out ----
    logic [23:0] r_fb [0:FB_N-1];
