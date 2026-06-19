@@ -38,19 +38,40 @@ static void clear_buffers(Vrasterize *tb) {
 }
 
 const int texDim = 128;   // must match TEX_LW (1<<7) in rasterize.sv
+const int texLevels = 8;  // must match MIP_LEVELS (TEX_LW+1)
 
-// Load a test texture into the texture BRAM: a u->red, v->green gradient with
-// black grid lines every 16 texels, so UV mapping + REPEAT wrap are obvious.
-static void load_test_texture(Vrasterize *tb) {
-  for(int tv = 0; tv < texDim; tv++)
-    for(int tu = 0; tu < texDim; tu++) {
-      uint8_t r = tu * 2, g = tv * 2, b = 128;
-      if((tu & 15) == 0 || (tv & 15) == 0) { r = g = b = 0; }
-      tb->tex_waddr = tv * texDim + tu;
-      tb->tex_wdata = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-      tb->tex_we = 1;
-      tick(tb);
+// Build a mipmapped test texture and load it.  Level 0 is a u->red, v->green
+// gradient + grid; coarser levels are box-filter downsamples.  Each level is
+// uploaded to bank {y&1,x&1} at addr (L<<12)|((y>>1)<<6)|(x>>1) -- the uniform
+// 64x64-per-level slot layout the RTL expects.
+static void load_mipmapped_texture(Vrasterize *tb) {
+  static uint8_t mip[8][128][128][3];
+  for(int y = 0; y < texDim; y++)
+    for(int x = 0; x < texDim; x++) {
+      uint8_t r = x * 2, g = y * 2, b = 128;
+      if((x & 15) == 0 || (y & 15) == 0) { r = g = b = 0; }
+      mip[0][y][x][0] = r; mip[0][y][x][1] = g; mip[0][y][x][2] = b;
     }
+  for(int L = 1; L < texLevels; L++) {
+    int D = texDim >> L;
+    for(int y = 0; y < D; y++)
+      for(int x = 0; x < D; x++)
+        for(int c = 0; c < 3; c++)
+          mip[L][y][x][c] = (mip[L-1][2*y][2*x][c]   + mip[L-1][2*y][2*x+1][c]
+                           + mip[L-1][2*y+1][2*x][c] + mip[L-1][2*y+1][2*x+1][c]) >> 2;
+  }
+  for(int L = 0; L < texLevels; L++) {
+    int D = texDim >> L;
+    for(int y = 0; y < D; y++)
+      for(int x = 0; x < D; x++) {
+        tb->tex_wbank = ((y & 1) << 1) | (x & 1);
+        tb->tex_waddr = (L << 12) | ((y >> 1) << 6) | (x >> 1);
+        tb->tex_wdata = ((uint32_t)mip[L][y][x][0] << 16)
+                      | ((uint32_t)mip[L][y][x][1] << 8) | mip[L][y][x][2];
+        tb->tex_we = 1;
+        tick(tb);
+      }
+  }
   tb->tex_we = 0;
 }
 
@@ -106,6 +127,19 @@ static uint64_t render_triangle(Vrasterize *tb, const screen_tri &st) {
   tb->cb_start = (uint32_t)std::llround(Pcb.a_start*CS) & COL_MASK;
   tb->dcbdx    = (uint32_t)std::llround(Pcb.dadx   *CS) & COL_MASK;
   tb->dcbdy    = (uint32_t)std::llround(Pcb.dady   *CS) & COL_MASK;
+
+  // per-triangle mip LOD = 0.5*log2(texel-area / screen-area), clamped [0,7].
+  // (per-triangle approximation of the per-pixel uv Jacobian; A53 has the FP.)
+  double sa = 0.5 * std::fabs((double)(v1.x-v0.x)*(v2.y-v0.y) - (double)(v2.x-v0.x)*(v1.y-v0.y));
+  double ta = 0.5 * std::fabs((st.uv[1][0]-st.uv[0][0])*(st.uv[2][1]-st.uv[0][1])
+                            - (st.uv[2][0]-st.uv[0][0])*(st.uv[1][1]-st.uv[0][1]))
+                  * (double)texDim * (double)texDim;
+  int L = 0;
+  if(sa > 0.0 && ta > 0.0) {
+    long li = std::lround(0.5 * std::log2(ta / sa));
+    L = (li < 0) ? 0 : (li > texLevels-1 ? texLevels-1 : (int)li);
+  }
+  tb->lod = L;
 
   tb->go = 1; tick(tb); tb->go = 0;
   while(!tb->done) { tick(tb); ++ticks; }
@@ -198,6 +232,8 @@ int main(int argc, char *argv[]) {
   tb->go  = 0;
   tb->clear = 0;
   tb->tex_we = 0;
+  tb->tex_wbank = 0;
+  tb->lod = 0;
   tb->fb_raddr = 0;
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
@@ -206,7 +242,7 @@ int main(int argc, char *argv[]) {
   tb->rst = 0;
   tick(tb);
 
-  load_test_texture(tb);   // one-time texture upload
+  load_mipmapped_texture(tb);   // one-time mipmapped texture upload
 
   const int w = imageWidth, h = imageHeight;
   Rgb *framebuffer = new Rgb[w * h];
