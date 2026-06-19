@@ -7,7 +7,8 @@
 // bits (the rest integer).  Must match DEPTH_FRAC_BITS in rasterize.sv.
 static const int DEPTH_FRAC_BITS = 12;
 
-// A triangle vertex in screen space with a depth coordinate.
+// A triangle vertex in screen space with a depth coordinate.  x,y are in
+// sub-pixel fixed point (1/32 pixel, ×32); z is the depth value.
 struct vertex3d {
   int32_t x, y, z;
 };

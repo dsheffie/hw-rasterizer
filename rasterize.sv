@@ -669,38 +669,42 @@ module rasterize(clk, rst, go,
 	    end
 	  COMPUTE_BB:
 	    begin
-	       n_x_min = w_x_min;
-	       n_y_min = w_y_min;
-	       n_x_max = w_x_max;
-	       n_y_max = w_y_max;
-	       n_y = w_y_min;
-	       n_x = w_x_min;
+	       // vertices are sub-pixel (×32); the bounding box is whole pixels
+	       // (floor of the sub-pixel min/max).
+	       n_x_min = w_x_min >> 5;
+	       n_y_min = w_y_min >> 5;
+	       n_x_max = w_x_max >> 5;
+	       n_y_max = w_y_max >> 5;
+	       n_y = w_y_min >> 5;
+	       n_x = w_x_min >> 5;
 	       n_state = COMPUTE_XVEC;
 	    end
 	  COMPUTE_XVEC:
 	    begin
+	       // edge vectors scaled by 32 = the per-WHOLE-pixel edge-function step
+	       // (moving one pixel = +32 sub-pixel units).
 	       t_sub_a0 = r_v2_x;
 	       t_sub_b0 = r_v1_x;
-	       n_v2v1_x = w_sub0;
+	       n_v2v1_x = w_sub0 << 5;
 	       t_sub_a1 = r_v0_x;
 	       t_sub_b1 = r_v2_x;
-	       n_v0v2_x = w_sub1;
+	       n_v0v2_x = w_sub1 << 5;
 	       t_sub_a2 = r_v1_x;
-	       t_sub_b2 = r_v0_x;	       
-	       n_v1v0_x = w_sub2;
+	       t_sub_b2 = r_v0_x;
+	       n_v1v0_x = w_sub2 << 5;
 	       n_state = COMPUTE_YVEC;
 	    end
 	  COMPUTE_YVEC:
 	    begin
 	       t_sub_a0 = r_v2_y;
 	       t_sub_b0 = r_v1_y;
-	       n_v2v1_y = w_sub0;
+	       n_v2v1_y = w_sub0 << 5;
 	       t_sub_a1 = r_v0_y;
 	       t_sub_b1 = r_v2_y;
-	       n_v0v2_y = w_sub1;
+	       n_v0v2_y = w_sub1 << 5;
 	       t_sub_a2 = r_v1_y;
-	       t_sub_b2 = r_v0_y;	       
-	       n_v1v0_y = w_sub2;
+	       t_sub_b2 = r_v0_y;
+	       n_v1v0_y = w_sub2 << 5;
 	       n_state = COMPUTE_START_ADDR;
 	    end
 	  COMPUTE_START_ADDR:
@@ -727,7 +731,7 @@ module rasterize(clk, rst, go,
 	    begin
 	       if(r_x == r_x_max)
 		      begin
-			 n_x = w_x_min;
+			 n_x = r_x_min;
 			 n_y = r_y + 'd1;
 			 n_start_addr = r_start_addr + r_x_dim;
 			 n_addr = r_start_addr + r_x_dim;
@@ -785,7 +789,7 @@ module rasterize(clk, rst, go,
 
 		      end // else: !if(r_x == r_x_max)
 		    
-		    if((r_y == w_y_max) & (r_x == r_x_max))
+		    if((r_y == r_y_max) & (r_x == r_x_max))
 		      begin
 			 n_state = DRAIN;
 		      end

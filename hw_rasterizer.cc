@@ -47,10 +47,9 @@ static void submit_screen_tri(const screen_vertex *a, const screen_vertex *b, co
   float   invw[3]  = {1.0f, 1.0f, 1.0f};    // screen-space already; recip is a no-op
   uint8_t col[3][3];
   for(int i = 0; i < 3; i++) {
-    int x = vin[i]->x / SCREEN_VERTEX_V2_SCALE;
-    int y = vin[i]->y / SCREEN_VERTEX_V2_SCALE;
-    pos[i][0] = x;
-    pos[i][1] = (DISPLAY_H - 1) - y;            // GL y-up -> framebuffer top-down
+    // keep full sub-pixel precision (screen_vertex x,y are already ×32)
+    pos[i][0] = vin[i]->x;
+    pos[i][1] = (DISPLAY_H - 1) * SCREEN_VERTEX_V2_SCALE - vin[i]->y;  // GL y-up -> top-down
     pos[i][2] = (int32_t)(vin[i]->z >> 16);     // 32-bit z -> 16-bit depth
     col[i][0] = vin[i]->r; col[i][1] = vin[i]->g; col[i][2] = vin[i]->b;
   }

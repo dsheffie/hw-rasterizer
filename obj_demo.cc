@@ -77,7 +77,8 @@ static void render_triangle(hw_rast *d, const screen_tri &st,
   float   uv[3][2], invw[3];
   uint8_t col[3][3];
   for(int i = 0; i < 3; i++) {
-    pos[i][0] = st.v[i].x; pos[i][1] = st.v[i].y; pos[i][2] = st.v[i].z;
+    // x,y are whole-pixel here; the engine wants sub-pixel (×32) coords
+    pos[i][0] = st.v[i].x * 32; pos[i][1] = st.v[i].y * 32; pos[i][2] = st.v[i].z;
     uv[i][0]  = st.uv[i][0]; uv[i][1] = st.uv[i][1];
     invw[i]   = st.invw[i];
     col[i][0] = st.col[i][0]; col[i][1] = st.col[i][1]; col[i][2] = st.col[i][2];

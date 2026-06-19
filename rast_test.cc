@@ -8,6 +8,7 @@ extern "C" {
 #undef bool
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #if __has_include(<SDL2/SDL.h>)
 #include <SDL2/SDL.h>
 #else
@@ -55,14 +56,54 @@ static void V(screen_vertex &s, int x, int y, uint32_t z,
   s.z = z; s.r = r; s.g = g; s.b = b; s.a = 255;
 }
 
+// A fan of thin spokes about a center -- the worst case for vertex snapping.
+// snap=false places the outer points at their true sub-pixel position; snap=true
+// rounds them to whole pixels (what integer-vertex rasterization sees). Same
+// engine both ways, so any difference is purely the sub-pixel coordinates.
+static void draw_spokes(float ccx, float ccy, bool snap) {
+  const int N = 24;
+  const float R = 150.0f;
+  for(int k = 0; k < N; k++) {
+    float a = k * (3.14159265f * 2.0f / N);
+    float ex = ccx + R*cosf(a), ey = ccy + R*sinf(a);
+    float px = -sinf(a), py = cosf(a);          // perpendicular, for a thin wedge
+    screen_vertex t[3];
+    auto put = [&](screen_vertex &s, float x, float y) {
+      if(snap) { x = roundf(x); y = roundf(y); }
+      s.x = (uint16_t)lroundf(x*32); s.y = (uint16_t)lroundf(y*32);
+      s.z = 0x20000000; s.r = 220; s.g = 220; s.b = 230; s.a = 255;
+    };
+    put(t[0], ccx, ccy);
+    put(t[1], ex + px*1.2f, ey + py*1.2f);
+    put(t[2], ex - px*1.2f, ey - py*1.2f);
+    rasterizer_draw(DRAW_TRIANGLES, 3, t);
+  }
+}
+
 int main(int argc, char *argv[]) {
-  bool sdl = false;
-  for(int i = 1; i < argc; i++)
+  bool sdl = false, spokes = false;
+  for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "--sdl") == 0) sdl = true;
+    else if(strcmp(argv[i], "--spokes") == 0) spokes = true;
+  }
 
   rasterizer_winopen((char*)"irisgl backend test");
   rasterizer_zbuffer(1);
   rasterizer_czclear(0, 0, 0, 0, 0xffffffff);
+
+  if(spokes) {
+    draw_spokes(220, 240, false);   // left: true sub-pixel
+    draw_spokes(580, 240, true);    // right: integer-snapped vertices
+    rasterizer_swap();
+    unsigned char *fb = rasterizer_frontbuffer();
+    if(sdl) return show_sdl(fb, 800, 480);
+    FILE *f = fopen("irisgl_test.ppm", "wb");
+    fprintf(f, "P6\n800 480\n255\n");
+    for(int i = 0; i < 800*480; i++) { fputc(fb[i*4+2],f); fputc(fb[i*4+1],f); fputc(fb[i*4+0],f); }
+    fclose(f);
+    printf("wrote irisgl_test.ppm (left=sub-pixel, right=snapped)\n");
+    return 0;
+  }
 
   screen_vertex tri[6];
   // near triangle (small z), R/G/B Gouraud corners

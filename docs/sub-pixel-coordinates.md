@@ -96,13 +96,16 @@ since AA needs to know how much of each pixel the edge crosses.
 
 ## Status in this design
 
-Our engine currently takes **integer vertices**: `hw_rasterizer.cc` does the
-`sv.x / 32` truncation above, and `setup.cc`'s edge/plane setup runs on integer
-coordinates. That's the source of the ragged edges visible when we run the SGI
-[IRIS GL demos](toward-minigl.html). The fix is mechanical and matches the
-pattern above: stop truncating, set up the edge functions in ×32 space (the
-determinants grow by `32²`, so widen the fixed-point), and start the sweep at the
-first pixel center `(xmin·32+16, ymin·32+16)`.
+Implemented. Vertices flow through the engine in **sub-pixel** (×32) form:
+`setup.cc` builds the edge functions in ×32² units evaluated at the first pixel
+center, and the depth/attribute planes in floating *pixel* coordinates (so the
+gradients are per whole pixel) — also sampled at the center. `rasterize.sv`
+derives the bounding box as `min/max(x) >> 5` (whole pixels) and scales the
+per-pixel edge step by `<< 5`; the inner sweep is otherwise unchanged. The
+frontends feed sub-pixel coords directly: `hw_rasterizer.cc` passes the IRIS GL
+`1/32` vertices through without truncating, and the OBJ demo multiplies its
+whole-pixel coordinates by 32. The visible result is smoother triangle
+silhouettes when we run the SGI [IRIS GL demos](toward-minigl.html).
 
 Next: [Barycentric coordinates](barycentric.html) — the same edge functions,
 normalized, become the bridge from coverage to interpolation.
