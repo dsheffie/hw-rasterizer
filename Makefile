@@ -82,6 +82,30 @@ irisgl_test: irisgl_test_bin
 irisgl_test_bin: rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
 	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/*.o verilated.o -lpthread $(shell pkg-config --libs sdl2) -o irisgl_test_bin
 
+# Run a real SGI/IRIS GL demo (ideas) on our engine.  We build the demo the
+# repo's own way (its shim/K&R-C/GLES handling) with clang, then re-link it
+# against OUR rasterizer: placing hw_rasterizer ahead of libgl.a means the
+# linker resolves rasterizer_* from us and never pulls reference_rasterizer.o.
+SGI       = sgi-demos
+SGI_CC    = clang-14
+SGI_BIN   = bin-linux-x86_64
+GLES_DIR  = $(SGI)/libs/libgles
+GLES_LINK = -L$(GLES_DIR)/lib-linux -lGLESv2 -lEGL -Wl,-rpath,$(GLES_DIR)/lib-linux
+
+.PHONY: ideas
+ideas: ideas_hw
+	@echo "built ideas_hw -- run: ./ideas_hw"
+
+ideas_hw: hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+	$(MAKE) native -C $(SGI)/demos/ideas CC="$(SGI_CC)"
+	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo \
+	  hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc \
+	  $(SGI)/demos/ideas/$(SGI_BIN)/*.o \
+	  $(SGI)/libs/libdemo/$(SGI_BIN)/libdemo.a \
+	  obj_dir_demo/*.o verilated.o \
+	  $(SGI)/libs/libgl/$(SGI_BIN)/libgl.a \
+	  $(shell sdl2-config --libs) $(GLES_LINK) -lm -lpthread -o ideas_hw
+
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
 recip_test: recip_tb recip_seed.hex

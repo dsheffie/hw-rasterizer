@@ -36,8 +36,9 @@ tri_setup setup_triangle(const vertex3d &v0, const vertex3d &v1, const vertex3d 
   // Normalize once per triangle into Q.DEPTH_FRAC_BITS fixed point, so the
   // RTL stepper carries true depth: bounded width and comparable across
   // triangles (no per-fragment divide).
-  s.dzdx = (dzdx_num << DEPTH_FRAC_BITS) / area;
-  s.dzdy = (dzdy_num << DEPTH_FRAC_BITS) / area;
+  // multiply (not <<) so a negative numerator isn't UB; same value either way
+  s.dzdx = dzdx_num * ((int64_t)1 << DEPTH_FRAC_BITS) / area;
+  s.dzdy = dzdy_num * ((int64_t)1 << DEPTH_FRAC_BITS) / area;
 
   // depth at the start corner; +0.5 LSB so the RTL's fraction truncation
   // behaves as round-to-nearest.

@@ -19,6 +19,8 @@ extern "C" {
 #include "gfx.h"
 #include "hw_rast.h"
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <math.h>
 
 // must match XMAXSCREEN+1 / YMAXSCREEN+1 in sgi-demos include/gl/gl.h
@@ -29,6 +31,9 @@ extern "C" {
 static hw_rast *dev = 0;
 static float    the_linewidth = 1.0f;
 static int      zbuffer_on = 0;
+
+// HW_DEBUG=1 dumps the first few draw calls / triangles (read env once)
+static int hw_debug() { static int v = -1; if(v < 0) v = getenv("HW_DEBUG") ? 1 : 0; return v; }
 
 // the front buffer sdl_framebuffer presents: BGRA, top-down
 static unsigned char frontbuf[DISPLAY_H * DISPLAY_W * 4];
@@ -56,6 +61,12 @@ static void submit_screen_tri(const screen_vertex *a, const screen_vertex *b, co
   if(area < 0) {
     for(int k = 0; k < 3; k++) { int32_t t = pos[1][k]; pos[1][k] = pos[2][k]; pos[2][k] = t; }
     for(int k = 0; k < 3; k++) { uint8_t t = col[1][k]; col[1][k] = col[2][k]; col[2][k] = t; }
+  }
+  if(hw_debug()) {
+    static int n = 0;
+    if(n++ < 8) fprintf(stderr, "tri %d: (%d,%d,%d)c%d,%d,%d (%d,%d,%d) (%d,%d,%d)\n", n,
+        pos[0][0],pos[0][1],pos[0][2], col[0][0],col[0][1],col[0][2],
+        pos[1][0],pos[1][1],pos[1][2], pos[2][0],pos[2][1],pos[2][2]);
   }
   submit_triangle(dev, pos, uv, invw, col, 0, 255);
 }
@@ -107,6 +118,7 @@ int32_t rasterizer_winopen(char *title) {
 }
 
 void rasterizer_draw(uint32_t type, uint32_t count, screen_vertex *v) {
+  if(hw_debug()) { static int n=0; if(n++<12) fprintf(stderr,"draw type=%u count=%u\n",type,count); }
   if(type == DRAW_TRIANGLES)
     for(uint32_t i = 0; i < count / 3; i++) submit_screen_tri(&v[3*i], &v[3*i+1], &v[3*i+2]);
   else if(type == DRAW_LINES)
@@ -123,6 +135,23 @@ void rasterizer_swap() {
     frontbuf[i*4 + 2] = rgbbuf[i*3 + 0];   // R
     frontbuf[i*4 + 3] = 255;
   }
+
+  // Headless capture/exit, for verifying demos without a display.
+  // GEN_FRAME_PPM_FILES=1 dumps frameNNNN.ppm; HW_MAX_FRAMES=N exits after N.
+  static int frame = 0;
+  if(getenv("GEN_FRAME_PPM_FILES")) {
+    char name[64];
+    snprintf(name, sizeof name, "frame%04d.ppm", frame);
+    FILE *fp = fopen(name, "wb");
+    if(fp) {
+      fprintf(fp, "P6\n%d %d\n255\n", DISPLAY_W, DISPLAY_H);
+      fwrite(rgbbuf, 1, DISPLAY_W * DISPLAY_H * 3, fp);   // rgbbuf is RGB, top-down
+      fclose(fp);
+    }
+  }
+  frame++;
+  const char *mx = getenv("HW_MAX_FRAMES");
+  if(mx && frame >= atoi(mx)) exit(0);
 }
 
 unsigned char *rasterizer_frontbuffer() { return frontbuf; }
