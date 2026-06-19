@@ -11,7 +11,7 @@
 #else
 #include <SDL.h>
 #endif
-#include "Vrasterize.h"
+#include "hw_rast.h"
 #include "setup.h"
 #include "obj.h"
 #include "pipeline.h"
@@ -23,19 +23,6 @@ const int32_t imageWidth = SCREEN_RES;
 const int32_t imageHeight = SCREEN_RES;
 
 typedef uint8_t Rgb[3];
-
-static inline void tick(Vrasterize *tb) {
-  tb->clk = (~tb->clk) & 1;
-  tb->eval();
-  tb->clk = (~tb->clk) & 1;
-  tb->eval();
-}
-
-// Reset the on-chip color + depth buffers (clear sweep).  Model must be IDLE.
-static void clear_buffers(Vrasterize *tb) {
-  tb->clear = 1; tick(tb); tb->clear = 0;
-  while(tb->clearing) tick(tb);
-}
 
 const int texDim = 128;   // must match TEX_LW (1<<7) in rasterize.sv
 const int texLevels = 8;  // must match MIP_LEVELS (TEX_LW+1)
@@ -63,7 +50,7 @@ static float vnoise(float x, float y, int period) {
 // value-noise "stone"; --grid uses the high-frequency u/v gradient+grid (a
 // worst case for aliasing, handy for checking UV mapping).  Coarser levels are
 // box-filter downsamples, uploaded to bank {y&1,x&1} at the uniform 64x64 slot.
-static void load_mipmapped_texture(Vrasterize *tb, bool grid) {
+static void load_mipmapped_texture(hw_rast *d, bool grid) {
   static uint8_t mip[8][128][128][3];
   for(int y = 0; y < texDim; y++)
     for(int x = 0; x < texDim; x++) {
@@ -91,95 +78,52 @@ static void load_mipmapped_texture(Vrasterize *tb, bool grid) {
     int D = texDim >> L;
     for(int y = 0; y < D; y++)
       for(int x = 0; x < D; x++) {
-        tb->tex_wbank = ((y & 1) << 1) | (x & 1);
-        tb->tex_waddr = (L << 12) | ((y >> 1) << 6) | (x >> 1);
-        tb->tex_wdata = ((uint32_t)mip[L][y][x][0] << 16)
-                      | ((uint32_t)mip[L][y][x][1] << 8) | mip[L][y][x][2];
-        tb->tex_we = 1;
-        tick(tb);
+        int bank = ((y & 1) << 1) | (x & 1);
+        uint32_t addr = (L << 12) | ((y >> 1) << 6) | (x >> 1);
+        uint32_t rgb = ((uint32_t)mip[L][y][x][0] << 16)
+                     | ((uint32_t)mip[L][y][x][1] << 8) | mip[L][y][x][2];
+        hw_tex_write(d, bank, addr, rgb);
       }
   }
-  tb->tex_we = 0;
 }
 
-// Drive the RTL for one triangle.  The hardware does depth test, checkerboard
-// texturing and shade modulation and writes the survivors straight into the
-// on-chip framebuffer.  Expects the model IDLE on entry/return.
-static uint64_t render_triangle(Vrasterize *tb, const screen_tri &st) {
+// Set up one screen-space triangle (edge functions, depth/attribute/color
+// planes -- all the per-triangle math) and submit it to the engine.  The
+// LOD is computed per-pixel in hardware, so no LOD is sent.
+static void render_triangle(hw_rast *d, const screen_tri &st,
+                            uint8_t blend_mode, uint8_t alpha) {
   const vertex3d &v0 = st.v[0], &v1 = st.v[1], &v2 = st.v[2];
-  // x/y vertices feed the on-chip bounding-box and edge-delta logic
-  tb->v0_x = v0.x; tb->v0_y = v0.y;
-  tb->v1_x = v1.x; tb->v1_y = v1.y;
-  tb->v2_x = v2.x; tb->v2_y = v2.y;
-  uint64_t ticks = 0;
-  // host-computed edge weights and depth plane equation
   tri_setup s = setup_triangle(v0, v1, v2);
-  tb->w0 = s.w0; tb->w1 = s.w1; tb->w2 = s.w2;
-  tb->dzdx = s.dzdx; tb->dzdy = s.dzdy; tb->z_start = s.z_start;
 
-  // Perspective-correct texturing: interpolate u/w, v/w and 1/w as planes
-  // (all linear in screen space).  The host computes the plane gradients; the
-  // RTL steppers carry them across the bounding box (same shape as depth).
-  // The reciprocal + texel lookup are done in software on the values read back.
+  // perspective-correct attribute planes (u/w, t/w, 1/w) and Gouraud color
   attr_plane Psw = setup_attr(v0, v1, v2, st.uv[0][0]*st.invw[0], st.uv[1][0]*st.invw[1], st.uv[2][0]*st.invw[2]);
   attr_plane Ptw = setup_attr(v0, v1, v2, st.uv[0][1]*st.invw[0], st.uv[1][1]*st.invw[1], st.uv[2][1]*st.invw[2]);
   attr_plane Piw = setup_attr(v0, v1, v2, st.invw[0], st.invw[1], st.invw[2]);
-
-  // convert plane (start, dx, dy) to Q.ATTR_FRAC_BITS fixed point for the RTL
-  const double S = (double)(1 << 12);                 // ATTR_FRAC_BITS = 12
-  const uint64_t SW_MASK = (1ULL << 48) - 1;          // u/w, t/w are 36.12
-  const uint32_t IW_MASK = (1U   << 30) - 1;          // 1/w is 18.12
-  tb->sw_start = (uint64_t)std::llround(Psw.a_start*S) & SW_MASK;
-  tb->dswdx    = (uint64_t)std::llround(Psw.dadx   *S) & SW_MASK;
-  tb->dswdy    = (uint64_t)std::llround(Psw.dady   *S) & SW_MASK;
-  tb->tw_start = (uint64_t)std::llround(Ptw.a_start*S) & SW_MASK;
-  tb->dtwdx    = (uint64_t)std::llround(Ptw.dadx   *S) & SW_MASK;
-  tb->dtwdy    = (uint64_t)std::llround(Ptw.dady   *S) & SW_MASK;
-  tb->iw_start = (uint32_t)std::llround(Piw.a_start*S) & IW_MASK;
-  tb->diwdx    = (uint32_t)std::llround(Piw.dadx   *S) & IW_MASK;
-  tb->diwdy    = (uint32_t)std::llround(Piw.dady   *S) & IW_MASK;
-
-  // Gouraud: per-vertex color planes (affine, no 1/w).  Q.COL_FRAC fixed point.
   attr_plane Pcr = setup_attr(v0, v1, v2, st.col[0][0], st.col[1][0], st.col[2][0]);
   attr_plane Pcg = setup_attr(v0, v1, v2, st.col[0][1], st.col[1][1], st.col[2][1]);
   attr_plane Pcb = setup_attr(v0, v1, v2, st.col[0][2], st.col[1][2], st.col[2][2]);
-  const double CS = (double)(1 << 12);                // COL_FRAC = 12
-  const uint32_t COL_MASK = (1u << 24) - 1;           // COL_W = 24
-  tb->cr_start = (uint32_t)std::llround(Pcr.a_start*CS) & COL_MASK;
-  tb->dcrdx    = (uint32_t)std::llround(Pcr.dadx   *CS) & COL_MASK;
-  tb->dcrdy    = (uint32_t)std::llround(Pcr.dady   *CS) & COL_MASK;
-  tb->cg_start = (uint32_t)std::llround(Pcg.a_start*CS) & COL_MASK;
-  tb->dcgdx    = (uint32_t)std::llround(Pcg.dadx   *CS) & COL_MASK;
-  tb->dcgdy    = (uint32_t)std::llround(Pcg.dady   *CS) & COL_MASK;
-  tb->cb_start = (uint32_t)std::llround(Pcb.a_start*CS) & COL_MASK;
-  tb->dcbdx    = (uint32_t)std::llround(Pcb.dadx   *CS) & COL_MASK;
-  tb->dcbdy    = (uint32_t)std::llround(Pcb.dady   *CS) & COL_MASK;
 
-  // mip LOD is now computed per-pixel in hardware (analytic uv Jacobian).
-
-  tb->go = 1; tick(tb); tb->go = 0;
-  while(!tb->done) { tick(tb); ++ticks; }
-  return ticks;
-}
-
-// Scan the on-chip framebuffer out into a host RGB buffer (registered read:
-// set address, clock, then read the data).
-static void readout_framebuffer(Vrasterize *tb, Rgb *fb, int n) {
-  for(int a = 0; a < n; a++) {
-    tb->fb_raddr = a;
-    tick(tb);
-    uint32_t c = tb->fb_rdata;
-    fb[a][0] = (c >> 16) & 0xff;
-    fb[a][1] = (c >> 8) & 0xff;
-    fb[a][2] = c & 0xff;
-  }
+  const double S = (double)(1 << 12);   // ATTR_FRAC_BITS / COL_FRAC = 12
+  hw_tri t;
+  t.v0x = v0.x; t.v0y = v0.y; t.v1x = v1.x; t.v1y = v1.y; t.v2x = v2.x; t.v2y = v2.y;
+  t.w0 = s.w0; t.w1 = s.w1; t.w2 = s.w2;
+  t.dzdx = s.dzdx; t.dzdy = s.dzdy; t.z_start = s.z_start;
+  t.sw_start = std::llround(Psw.a_start*S); t.dswdx = std::llround(Psw.dadx*S); t.dswdy = std::llround(Psw.dady*S);
+  t.tw_start = std::llround(Ptw.a_start*S); t.dtwdx = std::llround(Ptw.dadx*S); t.dtwdy = std::llround(Ptw.dady*S);
+  t.iw_start = (int32_t)std::llround(Piw.a_start*S); t.diwdx = (int32_t)std::llround(Piw.dadx*S); t.diwdy = (int32_t)std::llround(Piw.dady*S);
+  t.cr_start = (int32_t)std::llround(Pcr.a_start*S); t.dcrdx = (int32_t)std::llround(Pcr.dadx*S); t.dcrdy = (int32_t)std::llround(Pcr.dady*S);
+  t.cg_start = (int32_t)std::llround(Pcg.a_start*S); t.dcgdx = (int32_t)std::llround(Pcg.dadx*S); t.dcgdy = (int32_t)std::llround(Pcg.dady*S);
+  t.cb_start = (int32_t)std::llround(Pcb.a_start*S); t.dcbdx = (int32_t)std::llround(Pcb.dadx*S); t.dcbdy = (int32_t)std::llround(Pcb.dady*S);
+  t.blend_mode = blend_mode; t.alpha = alpha;
+  hw_draw_tri(d, &t);
 }
 
 // Live SDL viewer: spin the model and render each frame through the RTL into
 // an on-screen framebuffer.  Controls: Esc/Q quit, Space pause, Left/Right
 // nudge the yaw.  Returns nonzero if SDL can't open a window (e.g. headless).
-static int run_sdl(Vrasterize *tb, Rgb *fb, int w, int h,
-		   const std::vector<model_tri> &mesh, bool cull) {
+static int run_sdl(hw_rast *d, Rgb *fb, int w, int h,
+		   const std::vector<model_tri> &mesh, bool cull,
+		   uint8_t blend_mode, uint8_t alpha) {
   if(SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::cerr << "SDL_Init failed: " << SDL_GetError() << " (no display?)\n";
     return 1;
@@ -207,10 +151,10 @@ static int run_sdl(Vrasterize *tb, Rgb *fb, int w, int h,
     }
 
     // render one frame: clear on-chip buffers, rasterize, scan the FB out
-    clear_buffers(tb);
+    hw_clear(d);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
-    for(const screen_tri &t : tris) render_triangle(tb, t);
-    readout_framebuffer(tb, fb, w * h);
+    for(const screen_tri &t : tris) render_triangle(d, t, blend_mode, alpha);
+    hw_fb_read(d, (uint8_t*)fb);
 
     SDL_UpdateTexture(tex, nullptr, fb, w * 3);
     SDL_RenderClear(ren);
@@ -227,9 +171,6 @@ static int run_sdl(Vrasterize *tb, Rgb *fb, int w, int h,
 }
 
 int main(int argc, char *argv[]) {
-  const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
-  contextp->commandArgs(argc, argv);
-
   const char *model_path = "bigguy.obj";
   if(argc > 1 && argv[1][0] != '+' && argv[1][0] != '-') model_path = argv[1];
 
@@ -237,29 +178,21 @@ int main(int argc, char *argv[]) {
   int frames = 1;                         // --spin N: render N frames over 360 deg
   bool sdl = false;                       // --sdl: live spinning viewer
   bool grid = false;                      // --grid: debug uv gradient+grid texture
+  bool blend = false;                     // --blend: translucent (src-over) demo
   for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "--no-cull") == 0) cull = false;
     else if(strcmp(argv[i], "--spin") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
     else if(strcmp(argv[i], "--sdl") == 0) sdl = true;
     else if(strcmp(argv[i], "--grid") == 0) grid = true;
+    else if(strcmp(argv[i], "--blend") == 0) { blend = true; cull = false; }
   }
 
-  Vrasterize *tb = new Vrasterize;
-  tb->clk = 0;
-  tb->rst = 1;
-  tb->go  = 0;
-  tb->clear = 0;
-  tb->tex_we = 0;
-  tb->tex_wbank = 0;
-  tb->fb_raddr = 0;
-  tb->x_dim = imageWidth;
-  tb->y_dim = imageHeight;
+  hw_rast *d = hw_open(imageWidth, imageHeight);
+  load_mipmapped_texture(d, grid);    // one-time mipmapped texture upload
 
-  tick(tb);
-  tb->rst = 0;
-  tick(tb);
-
-  load_mipmapped_texture(tb, grid);   // one-time mipmapped texture upload
+  // blend state (uniform for the whole model here)
+  uint8_t blend_mode = blend ? 1 : 0; // 1 = src-over
+  uint8_t blend_alpha = 128;
 
   const int w = imageWidth, h = imageHeight;
   Rgb *framebuffer = new Rgb[w * h];
@@ -275,22 +208,19 @@ int main(int argc, char *argv[]) {
 	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
 
   if(sdl) {
-    int rc = run_sdl(tb, framebuffer, w, h, mesh, cull);
-    delete [] framebuffer; delete tb;
+    int rc = run_sdl(d, framebuffer, w, h, mesh, cull, blend_mode, blend_alpha);
+    delete [] framebuffer; hw_close(d);
     return rc;
   }
 
-  uint64_t ticks = 0;
   for(int f = 0; f < frames; f++) {
-    // clear the on-chip color + depth buffers each frame
-    clear_buffers(tb);
+    hw_clear(d);                        // clear color + depth each frame
 
     float yaw = 35.0f + (frames > 1 ? f * (360.0f / frames) : 0.0f);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
-    for(const screen_tri &t : tris) {
-      ticks += render_triangle(tb, t);
-    }
-    readout_framebuffer(tb, framebuffer, w * h);
+    for(const screen_tri &t : tris)
+      render_triangle(d, t, blend_mode, blend_alpha);
+    hw_fb_read(d, (uint8_t*)framebuffer);
 
     char name[64];
     if(frames > 1) snprintf(name, sizeof name, "frame_%03d.ppm", f);
@@ -303,10 +233,10 @@ int main(int argc, char *argv[]) {
 	      << " tris -> " << name << "\n";
   }
 
-  std::cout << "all done, " << frames << " frame(s), " << ticks << " clocks total\n";
+  std::cout << "all done, " << frames << " frame(s)\n";
 
   delete [] framebuffer;
-  delete tb;
+  hw_close(d);
 
   return 0;
 }

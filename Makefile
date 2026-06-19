@@ -1,6 +1,6 @@
 UNAME_S = $(shell uname -s)
 
-OBJ = top.o setup.o obj.o pipeline.o verilated.o
+OBJ = top.o hw_rast_verilated.o setup.o obj.o pipeline.o verilated.o
 
 SV_SRC = rasterize.sv recip.sv
 
@@ -46,8 +46,8 @@ all: $(EXE)
 $(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a recip_seed.hex
 	$(CXX) $(CXXFLAGS) $(OBJ) obj_dir/*.o $(LIBS) -o $(EXE)
 
-top.o: top.cc obj_dir/Vrasterize__ALL.a
-	$(CXX) -MMD $(CXXFLAGS) -Iobj_dir -c $< 
+hw_rast_verilated.o: hw_rast_verilated.cc hw_rast.h obj_dir/Vrasterize__ALL.a
+	$(CXX) -MMD $(CXXFLAGS) -Iobj_dir -c $<
 
 verilated.o: $(VERILATOR_SRC)
 	$(CXX) -MMD $(CXXFLAGS) -c $< 
