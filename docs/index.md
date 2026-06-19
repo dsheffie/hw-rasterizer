@@ -69,10 +69,11 @@ for the walkthrough.*
 ## Contents
 
 1. [Edge functions & Pineda's algorithm](edge-functions.html) — coverage
-2. [Barycentric coordinates](barycentric.html) — coverage → interpolation
-3. [Iterated depth & the depth buffer](depth-buffer.html)
-4. [Perspective-correct texture coordinates](perspective-texturing.html)
-5. [Gouraud shading](gouraud-shading.html)
-6. [Bilinear filtering & mipmapping](texture-filtering.html) — banking
-7. [The hardware pipeline](hardware-pipeline.html)
-8. [Toward miniGL](toward-minigl.html)
+2. [Sub-pixel coordinates](sub-pixel-coordinates.html) — where the edges land
+3. [Barycentric coordinates](barycentric.html) — coverage → interpolation
+4. [Iterated depth & the depth buffer](depth-buffer.html)
+5. [Perspective-correct texture coordinates](perspective-texturing.html)
+6. [Gouraud shading](gouraud-shading.html)
+7. [Bilinear filtering & mipmapping](texture-filtering.html) — banking
+8. [The hardware pipeline](hardware-pipeline.html)
+9. [Toward miniGL](toward-minigl.html)

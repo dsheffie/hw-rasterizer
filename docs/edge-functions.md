@@ -94,5 +94,5 @@ half) — that's the first thing a tiled or edge-walking scanner would optimize.
   subtracts the edge's `Δy` and the row-step subtracts its `Δx`. Coverage is the
   single line `(r_w0[31] | r_w1[31] | r_w2[31]) == 0` — no sign bit set = inside.
 
-Next: [Barycentric coordinates](barycentric.html) — the same edge functions,
-normalized, become the bridge from coverage to interpolation.
+Next: [Sub-pixel coordinates](sub-pixel-coordinates.html) — how much precision we
+keep in the vertex positions decides where these edges actually land.

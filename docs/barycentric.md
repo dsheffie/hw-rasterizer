@@ -1,6 +1,6 @@
 ---
 title: Barycentric coordinates
-nav_order: 3
+nav_order: 4
 ---
 
 # Barycentric coordinates (the edge functions, normalized)

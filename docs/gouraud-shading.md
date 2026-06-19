@@ -1,6 +1,6 @@
 ---
 title: Gouraud shading
-nav_order: 6
+nav_order: 7
 ---
 
 # Gouraud shading — more steppers

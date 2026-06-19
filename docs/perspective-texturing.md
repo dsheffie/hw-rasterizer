@@ -1,6 +1,6 @@
 ---
 title: Perspective-correct texture coordinates
-nav_order: 5
+nav_order: 6
 ---
 
 # Perspective-correct `u, v` (and `1/w`)

@@ -1,6 +1,6 @@
 ---
 title: The hardware pipeline
-nav_order: 8
+nav_order: 9
 ---
 
 # The hardware pipeline — setup vs. iterate, and keeping it fed

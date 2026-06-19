@@ -1,6 +1,6 @@
 ---
 title: Iterated depth & the depth buffer
-nav_order: 4
+nav_order: 5
 ---
 
 # Iterated `z` and the depth buffer
