@@ -28,6 +28,7 @@ typedef struct {
   int32_t cb_start, dcbdx, dcbdy;         // Gouraud B plane
   uint8_t blend_mode;                     // 0 opaque, 1 src-over, 2 additive
   uint8_t alpha;                          // source alpha for src-over
+  uint8_t z_enable;                       // 1 = depth test, 0 = always pass
 } hw_tri;
 
 typedef struct hw_rast hw_rast;           // opaque engine handle

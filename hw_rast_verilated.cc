@@ -21,7 +21,7 @@ extern "C" hw_rast *hw_open(int width, int height) {
   d->w = width; d->h = height;
   Vrasterize *tb = d->tb;
   tb->clk = 0; tb->rst = 1; tb->go = 0; tb->clear = 0;
-  tb->tex_we = 0; tb->tex_wbank = 0; tb->blend_mode = 0; tb->tri_alpha = 255;
+  tb->tex_we = 0; tb->tex_wbank = 0; tb->blend_mode = 0; tb->tri_alpha = 255; tb->z_enable = 1;
   tb->fb_raddr = 0; tb->x_dim = width; tb->y_dim = height;
   tick(tb); tb->rst = 0; tick(tb);
   return d;
@@ -67,7 +67,7 @@ extern "C" void hw_draw_tri(hw_rast *d, const hw_tri *t) {
   tb->cb_start = (uint32_t)t->cb_start & COL_MASK;
   tb->dcbdx    = (uint32_t)t->dcbdx    & COL_MASK;
   tb->dcbdy    = (uint32_t)t->dcbdy    & COL_MASK;
-  tb->blend_mode = t->blend_mode; tb->tri_alpha = t->alpha;
+  tb->blend_mode = t->blend_mode; tb->tri_alpha = t->alpha; tb->z_enable = t->z_enable;
   tb->go = 1; tick(tb); tb->go = 0;
   while(!tb->done) tick(tb);
 }

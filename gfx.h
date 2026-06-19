@@ -23,7 +23,7 @@ void submit_triangle(hw_rast *d,
                      const float   uv[3][2],
                      const float   invw[3],
                      const uint8_t col[3][3],
-                     uint8_t blend_mode, uint8_t alpha);
+                     uint8_t blend_mode, uint8_t alpha, uint8_t z_enable);
 
 // Build the mip chain from a dim x dim RGB image (dim must equal the RTL
 // texture dimension) and upload it to the engine's banked texture memory.

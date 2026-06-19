@@ -83,7 +83,7 @@ static void render_triangle(hw_rast *d, const screen_tri &st,
     invw[i]   = st.invw[i];
     col[i][0] = st.col[i][0]; col[i][1] = st.col[i][1]; col[i][2] = st.col[i][2];
   }
-  submit_triangle(d, pos, uv, invw, col, blend_mode, alpha);
+  submit_triangle(d, pos, uv, invw, col, blend_mode, alpha, 1);   // depth test on
 }
 
 // Live SDL viewer: spin the model and render each frame through the RTL into

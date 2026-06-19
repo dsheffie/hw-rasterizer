@@ -10,7 +10,7 @@ extern "C" void submit_triangle(hw_rast *d,
                                 const float   uv[3][2],
                                 const float   invw[3],
                                 const uint8_t col[3][3],
-                                uint8_t blend_mode, uint8_t alpha) {
+                                uint8_t blend_mode, uint8_t alpha, uint8_t z_enable) {
   vertex3d v0{pos[0][0], pos[0][1], pos[0][2]};
   vertex3d v1{pos[1][0], pos[1][1], pos[1][2]};
   vertex3d v2{pos[2][0], pos[2][1], pos[2][2]};
@@ -34,7 +34,7 @@ extern "C" void submit_triangle(hw_rast *d,
   t.cr_start = (int32_t)std::llround(Pcr.a_start*S); t.dcrdx = (int32_t)std::llround(Pcr.dadx*S); t.dcrdy = (int32_t)std::llround(Pcr.dady*S);
   t.cg_start = (int32_t)std::llround(Pcg.a_start*S); t.dcgdx = (int32_t)std::llround(Pcg.dadx*S); t.dcgdy = (int32_t)std::llround(Pcg.dady*S);
   t.cb_start = (int32_t)std::llround(Pcb.a_start*S); t.dcbdx = (int32_t)std::llround(Pcb.dadx*S); t.dcbdy = (int32_t)std::llround(Pcb.dady*S);
-  t.blend_mode = blend_mode; t.alpha = alpha;
+  t.blend_mode = blend_mode; t.alpha = alpha; t.z_enable = z_enable;
   hw_draw_tri(d, &t);
 }
 

@@ -50,7 +50,7 @@ static void submit_screen_tri(const screen_vertex *a, const screen_vertex *b, co
     // keep full sub-pixel precision (screen_vertex x,y are already ×32)
     pos[i][0] = vin[i]->x;
     pos[i][1] = (DISPLAY_H - 1) * SCREEN_VERTEX_V2_SCALE - vin[i]->y;  // GL y-up -> top-down
-    pos[i][2] = (int32_t)(vin[i]->z >> 16);     // 32-bit z -> 16-bit depth
+    pos[i][2] = (int32_t)(vin[i]->z >> 8);      // 32-bit z -> 24-bit depth
     col[i][0] = vin[i]->r; col[i][1] = vin[i]->g; col[i][2] = vin[i]->b;
   }
   // our coverage needs positive screen area; fix winding (swap v1,v2)
@@ -67,7 +67,7 @@ static void submit_screen_tri(const screen_vertex *a, const screen_vertex *b, co
         pos[0][0],pos[0][1],pos[0][2], col[0][0],col[0][1],col[0][2],
         pos[1][0],pos[1][1],pos[1][2], pos[2][0],pos[2][1],pos[2][2]);
   }
-  submit_triangle(dev, pos, uv, invw, col, 0, 255);
+  submit_triangle(dev, pos, uv, invw, col, 0, 255, (uint8_t)zbuffer_on);
 }
 
 static void offset_clamp(screen_vertex *v, float dx, float dy) {

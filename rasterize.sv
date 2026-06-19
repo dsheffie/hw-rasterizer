@@ -11,7 +11,7 @@ module rasterize(clk, rst, go,
 		 dcrdx, dcrdy, cr_start,
 		 dcgdx, dcgdy, cg_start,
 		 dcbdx, dcbdy, cb_start,
-		 blend_mode, tri_alpha,
+		 blend_mode, tri_alpha, z_enable,
 		 tex_we, tex_wbank, tex_waddr, tex_wdata,
 		 x_dim, y_dim,
 		 clear,
@@ -68,7 +68,7 @@ module rasterize(clk, rst, go,
    localparam SCREEN_H = `SCREEN_HEIGHT;
    localparam FB_N  = SCREEN_W * SCREEN_H;
    localparam FB_AW = $clog2(FB_N);
-   localparam Z_W   = 16;
+   localparam Z_W   = 24;   // depth buffer width (fits DEPTH_INT_BITS=25)
 
    input logic clk;
    input logic rst;
@@ -102,6 +102,7 @@ module rasterize(clk, rst, go,
    input logic [COL_W-1:0] dcbdx, dcbdy, cb_start;   // Gouraud B plane
    input logic [1:0]  blend_mode;   // 0 opaque, 1 src-over, 2 additive (per tri)
    input logic [7:0]  tri_alpha;    // per-triangle source alpha (src-over)
+   input logic 	      z_enable;     // 1 = depth test, 0 = always pass (painter's)
    input logic 	      tex_we;       // texture-load write enable (host)
    input logic [1:0]  tex_wbank;    // texture-load bank (host computes)
    input logic [31:0] tex_waddr;    // texture-load bank address (incl. level)
@@ -141,6 +142,7 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v2_x, r_v2_y;
    logic [1:0]  r_blend_mode;
    logic [7:0]  r_tri_alpha;
+   logic 	r_z_enable;
    logic 	t_save_tri;
 
    logic [31:0] n_x_min, r_x_min;
@@ -463,7 +465,8 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   wire w_zpass     = r_z1_valid & (r_z1_depth < r_z1_zold);
+   // depth test; when z_enable is off, every covered fragment passes (painter's)
+   wire w_zpass     = r_z1_valid & (~r_z_enable | (r_z1_depth < r_z1_zold));
    wire w_frag_wr   = w_pipe_en & w_zpass;     // commit this fragment
 
    // depth BRAM: clear takes priority, else conditional depth write; one read
@@ -829,6 +832,7 @@ module rasterize(clk, rst, go,
 	     r_v2_y <= v2_y;
 	     r_blend_mode <= blend_mode;
 	     r_tri_alpha  <= tri_alpha;
+	     r_z_enable   <= z_enable;
 	  end
      end
    
