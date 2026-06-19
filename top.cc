@@ -40,16 +40,43 @@ static void clear_buffers(Vrasterize *tb) {
 const int texDim = 128;   // must match TEX_LW (1<<7) in rasterize.sv
 const int texLevels = 8;  // must match MIP_LEVELS (TEX_LW+1)
 
-// Build a mipmapped test texture and load it.  Level 0 is a u->red, v->green
-// gradient + grid; coarser levels are box-filter downsamples.  Each level is
-// uploaded to bank {y&1,x&1} at addr (L<<12)|((y>>1)<<6)|(x>>1) -- the uniform
-// 64x64-per-level slot layout the RTL expects.
-static void load_mipmapped_texture(Vrasterize *tb) {
+// integer hash -> [0,1], used for tiling value noise
+static float vhash(int x, int y) {
+  uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return (float)(h & 0xffffff) / (float)0xffffff;
+}
+// value noise that tiles seamlessly with the given period (must divide texDim)
+static float vnoise(float x, float y, int period) {
+  int cells = texDim / period;
+  int x0 = (int)std::floor(x / period), y0 = (int)std::floor(y / period);
+  float tx = x / period - x0, ty = y / period - y0;
+  tx = tx*tx*(3-2*tx); ty = ty*ty*(3-2*ty);              // smoothstep
+  auto at = [&](int cx, int cy) {
+    return vhash(((cx % cells) + cells) % cells, ((cy % cells) + cells) % cells);
+  };
+  float a = at(x0,y0), b = at(x0+1,y0), c = at(x0,y0+1), d = at(x0+1,y0+1);
+  return (a + (b-a)*tx)*(1-ty) + (c + (d-c)*tx)*ty;
+}
+
+// Build a mipmapped texture and load it.  Default level 0 is broadband tiling
+// value-noise "stone"; --grid uses the high-frequency u/v gradient+grid (a
+// worst case for aliasing, handy for checking UV mapping).  Coarser levels are
+// box-filter downsamples, uploaded to bank {y&1,x&1} at the uniform 64x64 slot.
+static void load_mipmapped_texture(Vrasterize *tb, bool grid) {
   static uint8_t mip[8][128][128][3];
   for(int y = 0; y < texDim; y++)
     for(int x = 0; x < texDim; x++) {
-      uint8_t r = x * 2, g = y * 2, b = 128;
-      if((x & 15) == 0 || (y & 15) == 0) { r = g = b = 0; }
+      uint8_t r, g, b;
+      if(grid) {
+        r = x * 2; g = y * 2; b = 128;
+        if((x & 15) == 0 || (y & 15) == 0) { r = g = b = 0; }
+      } else {
+        float n = 0.55f*vnoise(x,y,32) + 0.30f*vnoise(x,y,16) + 0.15f*vnoise(x,y,8);
+        r = (uint8_t)(120 + n*110);   // warm stone
+        g = (uint8_t)(105 + n*95);
+        b = (uint8_t)(85  + n*70);
+      }
       mip[0][y][x][0] = r; mip[0][y][x][1] = g; mip[0][y][x][2] = b;
     }
   for(int L = 1; L < texLevels; L++) {
@@ -209,10 +236,12 @@ int main(int argc, char *argv[]) {
   bool cull = true;                       // backface culling, toggle with --no-cull
   int frames = 1;                         // --spin N: render N frames over 360 deg
   bool sdl = false;                       // --sdl: live spinning viewer
+  bool grid = false;                      // --grid: debug uv gradient+grid texture
   for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "--no-cull") == 0) cull = false;
     else if(strcmp(argv[i], "--spin") == 0 && i + 1 < argc) frames = atoi(argv[++i]);
     else if(strcmp(argv[i], "--sdl") == 0) sdl = true;
+    else if(strcmp(argv[i], "--grid") == 0) grid = true;
   }
 
   Vrasterize *tb = new Vrasterize;
@@ -230,7 +259,7 @@ int main(int argc, char *argv[]) {
   tb->rst = 0;
   tick(tb);
 
-  load_mipmapped_texture(tb);   // one-time mipmapped texture upload
+  load_mipmapped_texture(tb, grid);   // one-time mipmapped texture upload
 
   const int w = imageWidth, h = imageHeight;
   Rgb *framebuffer = new Rgb[w * h];
