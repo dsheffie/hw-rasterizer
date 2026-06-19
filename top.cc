@@ -16,8 +16,11 @@
 #include "obj.h"
 #include "pipeline.h"
 
-const int32_t imageWidth = 256;
-const int32_t imageHeight = 256;
+#ifndef SCREEN_RES
+#define SCREEN_RES 256          // must match the RTL SCREEN_RES (Makefile RES)
+#endif
+const int32_t imageWidth = SCREEN_RES;
+const int32_t imageHeight = SCREEN_RES;
 
 typedef uint8_t Rgb[3];
 

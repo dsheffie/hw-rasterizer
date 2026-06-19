@@ -4,6 +4,11 @@ OBJ = top.o setup.o obj.o pipeline.o verilated.o
 
 SV_SRC = rasterize.sv recip.sv
 
+# render resolution (square).  256 fits the FPGA BRAM; bump for sim inspection,
+# e.g. `make clean && make RES=512` (or just `make hires`).  Drives both the RTL
+# framebuffer/depth BRAM sizing and the C++ image dimensions.
+RES ?= 256
+
 ifeq ($(UNAME_S),Linux)
 	CXX = clang++-14 -flto
 	MAKE = make
@@ -27,7 +32,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 OPT = -O3 -g -std=c++14 -fomit-frame-pointer
-CXXFLAGS = -std=c++11 -g  $(OPT) -I$(VERILATOR_INC) -I$(VERILATOR_DPI_INC) $(SDL_CFLAGS) #-DLINUX_SYSCALL_EMULATION=1
+CXXFLAGS = -std=c++11 -g  $(OPT) -I$(VERILATOR_INC) -I$(VERILATOR_DPI_INC) $(SDL_CFLAGS) -DSCREEN_RES=$(RES) #-DLINUX_SYSCALL_EMULATION=1
 LIBS =  $(EXTRA_LD) -lpthread
 
 DEP = $(OBJ:.o=.d)
@@ -51,8 +56,14 @@ verilated.o: $(VERILATOR_SRC)
 	$(CXX) -MMD $(CXXFLAGS) -c $< 
 
 obj_dir/Vrasterize__ALL.a : $(SV_SRC)
-	$(VERILATOR) --x-assign unique -cc rasterize.sv recip.sv --top-module rasterize
+	$(VERILATOR) --x-assign unique -cc rasterize.sv recip.sv --top-module rasterize +define+SCREEN_RES=$(RES)
 	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir -f Vrasterize.mk
+
+# convenience: clean rebuild at a larger resolution for human inspection
+.PHONY: hires
+hires:
+	$(MAKE) clean
+	$(MAKE) RES=512
 
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test

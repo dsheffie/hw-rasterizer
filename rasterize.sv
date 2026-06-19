@@ -43,11 +43,18 @@ module rasterize(clk, rst, go,
    localparam TEX_W  = 1 << TEX_LW;
    localparam TEX_N  = TEX_W * TEX_W;
    localparam TEX_AW = 2 * TEX_LW;
+   // bilinear: 4 banks split by (x&1,y&1) for a 1-cycle 2x2 fetch
+   localparam TEXB_N  = TEX_N / 4;   // texels per bank
+   localparam TEXB_AW = TEX_AW - 2;  // per-bank address bits
+   localparam TEX_FB  = 16 - TEX_LW; // fractional bits of the texel coordinate
 
-   // on-chip color + depth buffer geometry (BRAM-backed at 256x256 to fit the
-   // ZU3EG's BRAM); depth quantized to Z_W bits
-   localparam SCREEN_W = 256;
-   localparam SCREEN_H = 256;
+   // on-chip color + depth buffer geometry.  SCREEN_RES is a build-time knob
+   // (default 256 fits the ZU3EG BRAM; `make RES=512` bumps it for sim).
+`ifndef SCREEN_RES
+ `define SCREEN_RES 256
+`endif
+   localparam SCREEN_W = `SCREEN_RES;
+   localparam SCREEN_H = `SCREEN_RES;
    localparam FB_N  = SCREEN_W * SCREEN_H;
    localparam FB_AW = $clog2(FB_N);
    localparam Z_W   = 16;
@@ -330,15 +337,65 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   // Z1 stage: fragment + its depth read + its texel, registered together
+   // ---- texel coordinate (bilinear) ----
+   // texel coord = u*TEX_W; with a half-texel offset so the 2x2 footprint
+   // surrounds the sample point.  base integer texel + Q(TEX_FB) fraction.
+   wire signed [31:0] w_su = $signed(r_s_u) - (1 << (TEX_FB-1));
+   wire signed [31:0] w_sv = $signed(r_s_v) - (1 << (TEX_FB-1));
+   wire signed [31:0] w_i0 = w_su >>> TEX_FB;
+   wire signed [31:0] w_j0 = w_sv >>> TEX_FB;
+   wire [TEX_FB-1:0]  w_fx = w_su[TEX_FB-1:0];
+   wire [TEX_FB-1:0]  w_fy = w_sv[TEX_FB-1:0];
+   wire               w_px = w_i0[0];
+   wire               w_py = w_j0[0];
+   // REPEAT-wrapped corner indices (power-of-two -> low-bit mask, no OOB)
+   wire [TEX_LW-1:0] w_x0 = w_i0[TEX_LW-1:0];
+   wire [TEX_LW-1:0] w_x1 = w_i0[TEX_LW-1:0] + 1'b1;
+   wire [TEX_LW-1:0] w_y0 = w_j0[TEX_LW-1:0];
+   wire [TEX_LW-1:0] w_y1 = w_j0[TEX_LW-1:0] + 1'b1;
+   // column/row by parity, then per-bank address (bank stores (x>>1,y>>1))
+   wire [TEX_LW-1:0] w_colp0 = w_px ? w_x1 : w_x0;   // x-parity 0 column
+   wire [TEX_LW-1:0] w_colp1 = w_px ? w_x0 : w_x1;   // x-parity 1 column
+   wire [TEX_LW-1:0] w_rowp0 = w_py ? w_y1 : w_y0;
+   wire [TEX_LW-1:0] w_rowp1 = w_py ? w_y0 : w_y1;
+   wire [TEXB_AW-1:0] w_ab0 = {w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab1 = {w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab2 = {w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab3 = {w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+
+   // ---- texture: 4 banks split by (x&1,y&1) -> the 2x2 quad is 1 texel per
+   // bank, so all four read in parallel.  Host loads linearly; route to bank
+   // {tv[0],tu[0]} at addr (tv>>1,tu>>1).
+   logic [23:0] r_tex0 [0:TEXB_N-1];  // x even, y even
+   logic [23:0] r_tex1 [0:TEXB_N-1];  // x odd,  y even
+   logic [23:0] r_tex2 [0:TEXB_N-1];  // x even, y odd
+   logic [23:0] r_tex3 [0:TEXB_N-1];  // x odd,  y odd
+   wire [1:0]         w_ldbank = {tex_waddr[TEX_LW], tex_waddr[0]};
+   wire [TEXB_AW-1:0] w_ldaddr = {tex_waddr[2*TEX_LW-1:TEX_LW+1], tex_waddr[TEX_LW-1:1]};
+   logic [23:0] r_z1_b0, r_z1_b1, r_z1_b2, r_z1_b3;
+   always_ff@(posedge clk)
+     begin
+	if(tex_we & (w_ldbank == 2'd0)) r_tex0[w_ldaddr] <= tex_wdata;
+	if(tex_we & (w_ldbank == 2'd1)) r_tex1[w_ldaddr] <= tex_wdata;
+	if(tex_we & (w_ldbank == 2'd2)) r_tex2[w_ldaddr] <= tex_wdata;
+	if(tex_we & (w_ldbank == 2'd3)) r_tex3[w_ldaddr] <= tex_wdata;
+	if(w_pipe_en)
+	  begin
+	     r_z1_b0 <= r_tex0[w_ab0];
+	     r_z1_b1 <= r_tex1[w_ab1];
+	     r_z1_b2 <= r_tex2[w_ab2];
+	     r_z1_b3 <= r_tex3[w_ab3];
+	  end
+     end
+
+   // Z1 stage: fragment + depth read + the quad fractions/parities, aligned
    logic        r_z1_valid;
    logic [31:0] r_z1_addr;
    logic [Z_W-1:0] r_z1_depth;
-   logic [31:0] r_z1_u, r_z1_v;
    logic [23:0] r_z1_col;
-   logic [23:0] r_z1_texel;
+   logic [TEX_FB-1:0] r_z1_fx, r_z1_fy;
+   logic        r_z1_px, r_z1_py;
    logic [Z_W-1:0] r_z1_zold;
-
    always_ff@(posedge clk)
      begin
 	if(rst) r_z1_valid <= 1'b0;
@@ -347,24 +404,12 @@ module rasterize(clk, rst, go,
 	  begin
 	     r_z1_addr  <= r_s_addr;
 	     r_z1_depth <= r_s_depth;
-	     r_z1_u     <= r_s_u;
-	     r_z1_v     <= r_s_v;
 	     r_z1_col   <= r_s_col;
+	     r_z1_fx    <= w_fx;
+	     r_z1_fy    <= w_fy;
+	     r_z1_px    <= w_px;
+	     r_z1_py    <= w_py;
 	  end
-     end
-
-   // ---- texture memory (BRAM): nearest sample with REPEAT wrap ----
-   // texel coord = uv >> (16-TEX_LW); low TEX_LW bits = REPEAT (works for
-   // negative uv too).  Read issued at the Z1 input (SHIFT-stage uv) so the
-   // texel lands at Z1 aligned with the fragment -- same trick as the depth read.
-   logic [23:0] r_tex [0:TEX_N-1];
-   wire signed [31:0] w_su = $signed(r_s_u) >>> (16 - TEX_LW);
-   wire signed [31:0] w_sv = $signed(r_s_v) >>> (16 - TEX_LW);
-   wire [TEX_AW-1:0]  w_texaddr = {w_sv[TEX_LW-1:0], w_su[TEX_LW-1:0]};
-   always_ff@(posedge clk)
-     begin
-	if(tex_we)     r_tex[tex_waddr[TEX_AW-1:0]] <= tex_wdata;
-	if(w_pipe_en)  r_z1_texel <= r_tex[w_texaddr];
      end
 
    wire w_zpass     = r_z1_valid & (r_z1_depth < r_z1_zold);
@@ -382,7 +427,22 @@ module rasterize(clk, rst, go,
 	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
      end
 
-   // ---- texel x Gouraud-color modulate (GL_MODULATE) ----
+   // ---- bilinear blend + GL_MODULATE ----
+   // un-swizzle the 4 banks into corners by (px,py), then lerp in x then y.
+   function automatic logic [7:0] lerp8(input logic [7:0] a, input logic [7:0] b,
+					input logic [TEX_FB-1:0] f);
+      logic signed [9:0]  d;
+      logic signed [9:0]  fs;
+      logic signed [19:0] prod;
+      logic signed [19:0] res;
+      begin
+	 d    = $signed({2'b0, b}) - $signed({2'b0, a});
+	 fs   = $signed({1'b0, f});
+	 prod = d * fs;
+	 res  = $signed({12'b0, a}) + (prod >>> TEX_FB);
+	 lerp8 = res[7:0];
+      end
+   endfunction
    // out_c = floor(texel_c * color_c / 255), exact via ((x+1)*257)>>16.
    function automatic logic [7:0] mul255(input logic [7:0] a, input logic [7:0] b);
       logic [15:0] p;
@@ -396,9 +456,25 @@ module rasterize(clk, rst, go,
       end
    endfunction
 
-   wire [23:0] w_color = {mul255(r_z1_texel[23:16], r_z1_col[23:16]),
-			  mul255(r_z1_texel[15:8],  r_z1_col[15:8]),
-			  mul255(r_z1_texel[7:0],   r_z1_col[7:0])};
+   logic [23:0] w_bank [0:3];
+   assign w_bank[0] = r_z1_b0;
+   assign w_bank[1] = r_z1_b1;
+   assign w_bank[2] = r_z1_b2;
+   assign w_bank[3] = r_z1_b3;
+   wire [23:0] w_t00 = w_bank[{r_z1_py,  r_z1_px}];
+   wire [23:0] w_t10 = w_bank[{r_z1_py, ~r_z1_px}];
+   wire [23:0] w_t01 = w_bank[{~r_z1_py, r_z1_px}];
+   wire [23:0] w_t11 = w_bank[{~r_z1_py,~r_z1_px}];
+   wire [7:0] w_tr = lerp8(lerp8(w_t00[23:16], w_t10[23:16], r_z1_fx),
+			   lerp8(w_t01[23:16], w_t11[23:16], r_z1_fx), r_z1_fy);
+   wire [7:0] w_tg = lerp8(lerp8(w_t00[15:8],  w_t10[15:8],  r_z1_fx),
+			   lerp8(w_t01[15:8],  w_t11[15:8],  r_z1_fx), r_z1_fy);
+   wire [7:0] w_tb = lerp8(lerp8(w_t00[7:0],   w_t10[7:0],   r_z1_fx),
+			   lerp8(w_t01[7:0],   w_t11[7:0],   r_z1_fx), r_z1_fy);
+
+   wire [23:0] w_color = {mul255(w_tr, r_z1_col[23:16]),
+			  mul255(w_tg, r_z1_col[15:8]),
+			  mul255(w_tb, r_z1_col[7:0])};
 
    // ---- color framebuffer (BRAM): clear, conditional write, host read-out ----
    logic [23:0] r_fb [0:FB_N-1];
