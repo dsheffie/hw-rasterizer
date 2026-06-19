@@ -11,6 +11,7 @@ module rasterize(clk, rst, go,
 		 dcrdx, dcrdy, cr_start,
 		 dcgdx, dcgdy, cg_start,
 		 dcbdx, dcbdy, cb_start,
+		 blend_mode, tri_alpha,
 		 tex_we, tex_wbank, tex_waddr, tex_wdata,
 		 x_dim, y_dim,
 		 clear,
@@ -93,6 +94,8 @@ module rasterize(clk, rst, go,
    input logic [COL_W-1:0] dcrdx, dcrdy, cr_start;   // Gouraud R plane
    input logic [COL_W-1:0] dcgdx, dcgdy, cg_start;   // Gouraud G plane
    input logic [COL_W-1:0] dcbdx, dcbdy, cb_start;   // Gouraud B plane
+   input logic [1:0]  blend_mode;   // 0 opaque, 1 src-over, 2 additive (per tri)
+   input logic [7:0]  tri_alpha;    // per-triangle source alpha (src-over)
    input logic 	      tex_we;       // texture-load write enable (host)
    input logic [1:0]  tex_wbank;    // texture-load bank (host computes)
    input logic [31:0] tex_waddr;    // texture-load bank address (incl. level)
@@ -130,6 +133,8 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v0_x, r_v0_y;
    logic [31:0] r_v1_x, r_v1_y;
    logic [31:0] r_v2_x, r_v2_y;
+   logic [1:0]  r_blend_mode;
+   logic [7:0]  r_tri_alpha;
    logic 	t_save_tri;
 
    logic [31:0] n_x_min, r_x_min;
@@ -382,8 +387,10 @@ module rasterize(clk, rst, go,
    wire signed [31:0] w_sv = $signed(r_s_v) - w_half;
    wire signed [31:0] w_i0 = w_su >>> w_sh;
    wire signed [31:0] w_j0 = w_sv >>> w_sh;
-   wire [TEX_FB-1:0]  w_fx = w_su[{2'b0, w_lod} +: TEX_FB];     // frac bits above L
-   wire [TEX_FB-1:0]  w_fy = w_sv[{2'b0, w_lod} +: TEX_FB];
+   wire [31:0]        w_sufr = $unsigned(w_su) >> w_lod;        // frac bits to low end
+   wire [31:0]        w_svfr = $unsigned(w_sv) >> w_lod;
+   wire [TEX_FB-1:0]  w_fx = w_sufr[TEX_FB-1:0];
+   wire [TEX_FB-1:0]  w_fy = w_svfr[TEX_FB-1:0];
    wire               w_px = w_i0[0];
    wire               w_py = w_j0[0];
    // REPEAT wrap within the level (low (TEX_LW-L) bits; L=0 wraps via 7-bit math)
@@ -433,6 +440,7 @@ module rasterize(clk, rst, go,
    logic [TEX_FB-1:0] r_z1_fx, r_z1_fy;
    logic        r_z1_px, r_z1_py;
    logic [Z_W-1:0] r_z1_zold;
+   logic [23:0] r_z1_fbold;       // framebuffer dst at this fragment (for blend)
    always_ff@(posedge clk)
      begin
 	if(rst) r_z1_valid <= 1'b0;
@@ -458,7 +466,7 @@ module rasterize(clk, rst, go,
      begin
 	if(r_clearing)
 	  r_zb[r_clear_cnt[FB_AW-1:0]] <= {Z_W{1'b1}};
-	else if(w_frag_wr)
+	else if(w_frag_wr & (r_blend_mode == 2'd0))   // only opaque writes depth
 	  r_zb[r_z1_addr[FB_AW-1:0]] <= r_z1_depth;
 	if(w_pipe_en)
 	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
@@ -492,6 +500,21 @@ module rasterize(clk, rst, go,
 	 mul255 = t[23:16];
       end
    endfunction
+   // blend one channel of src over/with dst per the mode + alpha
+   function automatic logic [7:0] blend_c(input logic [7:0] src, input logic [7:0] dst,
+					  input logic [7:0] a, input logic [1:0] mode);
+      logic [8:0] s;
+      begin
+	 case(mode)
+	   2'd1: blend_c = mul255(src, a) + mul255(dst, 8'd255 - a);   // src-over
+	   2'd2: begin                                                 // additive
+	      s = {1'b0, src} + {1'b0, dst};
+	      blend_c = s[8] ? 8'd255 : s[7:0];
+	   end
+	   default: blend_c = src;                                     // opaque
+	 endcase
+      end
+   endfunction
 
    logic [23:0] w_bank [0:3];
    assign w_bank[0] = r_z1_b0;
@@ -509,18 +532,26 @@ module rasterize(clk, rst, go,
    wire [7:0] w_tb = lerp8(lerp8(w_t00[7:0],   w_t10[7:0],   r_z1_fx),
 			   lerp8(w_t01[7:0],   w_t11[7:0],   r_z1_fx), r_z1_fy);
 
+   // src color = texel * Gouraud color (GL_MODULATE)
    wire [23:0] w_color = {mul255(w_tr, r_z1_col[23:16]),
 			  mul255(w_tg, r_z1_col[15:8]),
 			  mul255(w_tb, r_z1_col[7:0])};
+   // blend src over/with the framebuffer dst (r_z1_fbold), per blend mode
+   wire [23:0] w_blended = {blend_c(w_color[23:16], r_z1_fbold[23:16], r_tri_alpha, r_blend_mode),
+			    blend_c(w_color[15:8],  r_z1_fbold[15:8],  r_tri_alpha, r_blend_mode),
+			    blend_c(w_color[7:0],   r_z1_fbold[7:0],   r_tri_alpha, r_blend_mode)};
 
-   // ---- color framebuffer (BRAM): clear, conditional write, host read-out ----
+   // ---- color framebuffer (BRAM): clear, conditional blended write, dst read
+   // for blending, and the host scan-out read ----
    logic [23:0] r_fb [0:FB_N-1];
    always_ff@(posedge clk)
      begin
 	if(r_clearing)
 	  r_fb[r_clear_cnt[FB_AW-1:0]] <= 24'h0;
 	else if(w_frag_wr)
-	  r_fb[r_z1_addr[FB_AW-1:0]] <= w_color;
+	  r_fb[r_z1_addr[FB_AW-1:0]] <= w_blended;
+	if(w_pipe_en)
+	  r_z1_fbold <= r_fb[r_s_addr[FB_AW-1:0]];   // dst for next fragment's blend
 	fb_rdata <= r_fb[fb_raddr[FB_AW-1:0]];
      end
 
@@ -786,6 +817,8 @@ module rasterize(clk, rst, go,
 	     r_v1_y <= v1_y;
 	     r_v2_x <= v2_x;
 	     r_v2_y <= v2_y;
+	     r_blend_mode <= blend_mode;
+	     r_tri_alpha  <= tri_alpha;
 	  end
      end
    
