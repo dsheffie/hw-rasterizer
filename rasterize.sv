@@ -58,8 +58,14 @@ module rasterize(clk, rst, go,
 `ifndef SCREEN_RES
  `define SCREEN_RES 256
 `endif
-   localparam SCREEN_W = `SCREEN_RES;
-   localparam SCREEN_H = `SCREEN_RES;
+`ifndef SCREEN_WIDTH
+ `define SCREEN_WIDTH `SCREEN_RES
+`endif
+`ifndef SCREEN_HEIGHT
+ `define SCREEN_HEIGHT `SCREEN_RES
+`endif
+   localparam SCREEN_W = `SCREEN_WIDTH;
+   localparam SCREEN_H = `SCREEN_HEIGHT;
    localparam FB_N  = SCREEN_W * SCREEN_H;
    localparam FB_AW = $clog2(FB_N);
    localparam Z_W   = 16;

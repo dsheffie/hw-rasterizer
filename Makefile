@@ -65,6 +65,23 @@ hires:
 	$(MAKE) clean
 	$(MAKE) RES=512
 
+# --- IRIS GL backend (sgi-demos libgl) ---
+# The SGI display is 800x480 (XMAXSCREEN/YMAXSCREEN), bigger than the FPGA BRAM
+# but free in the Verilated model, so this path builds the engine non-square.
+SGI_INC = -Isgi-demos/libs/libgl -Isgi-demos/include/gl
+
+obj_dir_demo/Vrasterize__ALL.a : $(SV_SRC)
+	$(VERILATOR) --x-assign unique -cc rasterize.sv recip.sv --top-module rasterize --Mdir obj_dir_demo +define+SCREEN_WIDTH=800 +define+SCREEN_HEIGHT=480
+	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir_demo -f Vrasterize.mk
+
+# isolation test: feed rasterizer.h triangles directly, dump a PPM
+.PHONY: irisgl_test
+irisgl_test: irisgl_test_bin
+	./irisgl_test_bin
+
+irisgl_test_bin: rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/*.o verilated.o -lpthread $(shell pkg-config --libs sdl2) -o irisgl_test_bin
+
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
 recip_test: recip_tb recip_seed.hex
