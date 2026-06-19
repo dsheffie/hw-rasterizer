@@ -1,0 +1,20 @@
+title: Building a miniGL-class GPU
+description: How a hardware rasterizer works, from a 2D triangle up
+remote_theme: just-the-docs/just-the-docs
+
+plugins:
+  - jekyll-remote-theme
+
+aux_links:
+  GitHub repo:
+    - https://github.com/dsheffie/hw-rasterizer
+aux_links_new_tab: true
+
+# planning/working notes live in docs/ too -- keep them out of the site
+exclude:
+  - next-steps.md
+  - crime-rendering-engine-notes.md
+  - texture-mapping-plan.md
+  - tile-architecture.md
+  - depth-rasterizer.html
+  - building-a-minigl-gpu.md
