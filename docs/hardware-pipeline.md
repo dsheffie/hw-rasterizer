@@ -25,6 +25,15 @@ reciprocal.
 
 ## The fragment datapath
 
+![Rasterizer datapath block diagram](img/datapath.svg)
+
+*Block diagram of `rasterize.sv` + `recip.sv`. Dashed boxes are the three
+domains (host setup, the per-pixel scan/steppers, the texture unit); cylinders
+are on-chip memories. Solid arrows are the main fragment flow; dashed arrows are
+the side-band values that ride alongside the reciprocal/texture latency. The
+source is [`docs/img/datapath.dot`](img/datapath.dot) — regenerate with
+`dot -Tsvg datapath.dot -o datapath.svg`.*
+
 A covered fragment flows through, roughly:
 
 ```

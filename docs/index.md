@@ -61,6 +61,11 @@ The design has two halves, and the split is what makes it hardware-friendly:
 Setup is a few dozen flops per triangle; iteration is the hot loop. Everything
 below is an instance of this pattern.
 
+![Rasterizer datapath block diagram](img/datapath.svg)
+
+*The whole datapath at a glance — see [The hardware pipeline](hardware-pipeline.html)
+for the walkthrough.*
+
 ## Contents
 
 1. [Edge functions & Pineda's algorithm](edge-functions.html) — coverage

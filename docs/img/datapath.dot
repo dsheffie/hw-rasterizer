@@ -1,0 +1,69 @@
+// Block diagram of the rasterizer datapath, faithful to rasterize.sv / recip.sv.
+// Regenerate the SVG with:  dot -Tsvg datapath.dot -o datapath.svg
+digraph rasterizer {
+  rankdir=LR;
+  graph [fontname="Helvetica", fontsize=11, nodesep=0.4, ranksep=0.75, splines=spline];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#3b5b92"];
+  edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+  // ---- host (per-triangle setup) ----
+  subgraph cluster_host {
+    label="host / ARM  —  per-triangle setup (setup.cc, pipeline.cc)";
+    style="dashed,rounded"; color="#888888"; fontname="Helvetica"; fontsize=10;
+    setup [label="edge functions, depth & attribute\nplanes (Cramer), vertex lighting, LOD", fillcolor="#fff4e0", color="#b07a30"];
+  }
+
+  // ---- per-pixel scan / steppers (1 fragment / cycle) ----
+  subgraph cluster_scan {
+    label="scan FSM + iterated steppers  (1 fragment / cycle)";
+    style="dashed,rounded"; color="#888888"; fontsize=10;
+    edges [label="edge steppers\nw0 / w1 / w2"];
+    cov   [label="coverage\n(all signs +)", fillcolor="#e9f7e9", color="#3a7d3a"];
+    zst   [label="depth stepper\nz"];
+    ast   [label="attribute steppers\nu/w, t/w, 1/w"];
+    cst   [label="color steppers\nR, G, B (Gouraud)"];
+  }
+
+  // ---- perspective divide ----
+  recip [label="reciprocal\n(Newton, pipelined)\n1/w → w"];
+  seed  [label="seed ROM", shape=cylinder, style=filled, fillcolor="#f0e9f7", color="#6a4a8a"];
+  mul   [label="multiply\nu = (u/w)·w\nv = (t/w)·w"];
+
+  // ---- texture unit ----
+  subgraph cluster_tex {
+    label="texture unit";
+    style="dashed,rounded"; color="#888888"; fontsize=10;
+    tbank [label="texture: 4 banks (x&1, y&1)\n+ stacked mip chain", shape=cylinder, style=filled, fillcolor="#f0e9f7", color="#6a4a8a"];
+    bil   [label="bilinear\nquad fetch + crossbar + lerp\n(mip level from LOD)"];
+  }
+
+  // ---- backend ----
+  ztest [label="depth test\nread / compare / write", fillcolor="#e9f7e9", color="#3a7d3a"];
+  zbram [label="depth BRAM", shape=cylinder, style=filled, fillcolor="#f0e9f7", color="#6a4a8a"];
+  mod   [label="modulate\ntexel × color"];
+  fb    [label="framebuffer BRAM", shape=cylinder, style=filled, fillcolor="#f0e9f7", color="#6a4a8a"];
+  out   [label="scan-out\nto host", fillcolor="#fff4e0", color="#b07a30"];
+
+  // ---- flow ----
+  setup -> edges; setup -> zst; setup -> ast; setup -> cst;
+  edges -> cov;
+  cov   -> recip [label="covered"];
+  ast   -> recip [label="1/w"];
+  seed  -> recip;
+  recip -> mul   [label="w"];
+  ast   -> mul   [label="u/w, t/w", style=dashed];
+  mul   -> bil   [label="u, v"];
+  tbank -> bil;
+  bil   -> mod   [label="texel"];
+  cst   -> mod   [label="color (side-band)", style=dashed];
+  zst   -> ztest [label="z (side-band)", style=dashed];
+  mul   -> ztest [label="addr"];
+  ztest -> zbram [dir=both];
+  ztest -> mod   [label="z pass"];
+  mod   -> fb;
+  fb    -> out;
+
+  { rank=same; recip; seed; }
+  { rank=same; ztest; zbram; }
+  { rank=same; fb; out; }
+}
