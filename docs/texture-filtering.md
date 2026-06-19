@@ -78,10 +78,14 @@ gradients). Then `LOD = log2(longest footprint axis)`, and `log2` is just the
 position of the leading bit — the same leading-zero primitive the
 [reciprocal](perspective-texturing.html) uses.
 
-The current implementation computes a **per-triangle** LOD on the host (the
-texel-area / screen-area ratio) as a first cut — cheap, and good for the small
-triangles in these models. Per-pixel LOD via the formula above is the refinement
-for large depth-spanning triangles (Quake floors).
+The implementation computes the LOD **per pixel** in hardware via the formula
+above: at each fragment it forms the four partials from the constant per-triangle
+gradients and the per-pixel `u, v, w`, takes the largest, and `clz`'s the
+footprint to get the level. (An earlier version computed one LOD per *triangle*
+on the host — fine for tiny triangles, but on large faces at varying grazing
+angles, e.g. a torus, adjacent faces picked different levels and the texture
+detail jumped at every seam. Per-pixel LOD makes the level vary smoothly and
+fixes that.)
 
 ## In the code
 

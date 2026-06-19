@@ -11,7 +11,6 @@ module rasterize(clk, rst, go,
 		 dcrdx, dcrdy, cr_start,
 		 dcgdx, dcgdy, cg_start,
 		 dcbdx, dcbdy, cb_start,
-		 lod,
 		 tex_we, tex_wbank, tex_waddr, tex_wdata,
 		 x_dim, y_dim,
 		 clear,
@@ -94,7 +93,6 @@ module rasterize(clk, rst, go,
    input logic [COL_W-1:0] dcrdx, dcrdy, cr_start;   // Gouraud R plane
    input logic [COL_W-1:0] dcgdx, dcgdy, cg_start;   // Gouraud G plane
    input logic [COL_W-1:0] dcbdx, dcbdy, cb_start;   // Gouraud B plane
-   input logic [2:0]  lod;          // per-triangle mip level (computed on host)
    input logic 	      tex_we;       // texture-load write enable (host)
    input logic [1:0]  tex_wbank;    // texture-load bank (host computes)
    input logic [31:0] tex_waddr;    // texture-load bank address (incl. level)
@@ -132,7 +130,6 @@ module rasterize(clk, rst, go,
    logic [31:0] r_v0_x, r_v0_y;
    logic [31:0] r_v1_x, r_v1_y;
    logic [31:0] r_v2_x, r_v2_y;
-   logic [2:0]  r_lod;
    logic 	t_save_tri;
 
    logic [31:0] n_x_min, r_x_min;
@@ -282,6 +279,7 @@ module rasterize(clk, rst, go,
    logic [Z_W-1:0]    r_m_depth;
    logic [4:0]        r_m_e;
    logic [23:0]       r_m_col;
+   logic [17:0]       r_m_wq4;     // w in Q4 (w*16 = y>>e), for per-pixel LOD
    logic signed [66:0] r_m_uprod, r_m_vprod;
    always_ff@(posedge clk)
      begin
@@ -293,6 +291,7 @@ module rasterize(clk, rst, go,
 	     r_m_depth <= r_sb_depth[3][Z_W-1:0];
 	     r_m_e     <= w_recip_e;
 	     r_m_col   <= r_sb_col[3];
+	     r_m_wq4   <= w_recip_y >> w_recip_e;
 	     r_m_uprod <= $signed(r_sb_sw[3]) * w_sy;
 	     r_m_vprod <= $signed(r_sb_tw[3]) * w_sy;
 	  end
@@ -305,6 +304,7 @@ module rasterize(clk, rst, go,
    logic [31:0]    r_s_addr;
    logic [Z_W-1:0] r_s_depth;
    logic [23:0]    r_s_col;
+   logic [17:0]    r_s_wq4;
    logic [31:0]    r_s_u, r_s_v;
    always_ff@(posedge clk)
      begin
@@ -315,6 +315,7 @@ module rasterize(clk, rst, go,
 	     r_s_addr  <= r_m_addr;
 	     r_s_depth <= r_m_depth;
 	     r_s_col   <= r_m_col;
+	     r_s_wq4   <= r_m_wq4;
 	     r_s_u     <= w_ush[31:0];
 	     r_s_v     <= w_vsh[31:0];
 	  end
@@ -345,21 +346,48 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   // ---- texel coordinate at mip level L = r_lod ----
+   // ---- per-pixel level of detail (analytic uv Jacobian) ----
+   // du/dx = w*(Px - u*Wx) etc., with Px=dswdx... (Q12), u,v in Q16, w carried
+   // as w*16 (r_s_wq4).  A_* = (deriv)*2^12; LOD = log2(TEX_W * w * max|A|).
+   wire signed [63:0] w_uWx = ($signed(r_s_u) * $signed(diwdx)) >>> 16;
+   wire signed [63:0] w_uWy = ($signed(r_s_u) * $signed(diwdy)) >>> 16;
+   wire signed [63:0] w_vWx = ($signed(r_s_v) * $signed(diwdx)) >>> 16;
+   wire signed [63:0] w_vWy = ($signed(r_s_v) * $signed(diwdy)) >>> 16;
+   wire signed [63:0] w_Aux = $signed({{16{dswdx[SW_W-1]}}, dswdx}) - w_uWx;
+   wire signed [63:0] w_Auy = $signed({{16{dswdy[SW_W-1]}}, dswdy}) - w_uWy;
+   wire signed [63:0] w_Avx = $signed({{16{dtwdx[SW_W-1]}}, dtwdx}) - w_vWx;
+   wire signed [63:0] w_Avy = $signed({{16{dtwdy[SW_W-1]}}, dtwdy}) - w_vWy;
+   wire [63:0] w_mux = w_Aux[63] ? (~w_Aux + 64'd1) : w_Aux;
+   wire [63:0] w_muy = w_Auy[63] ? (~w_Auy + 64'd1) : w_Auy;
+   wire [63:0] w_mvx = w_Avx[63] ? (~w_Avx + 64'd1) : w_Avx;
+   wire [63:0] w_mvy = w_Avy[63] ? (~w_Avy + 64'd1) : w_Avy;
+   wire [63:0] w_mmx = (w_mux > w_muy) ? w_mux : w_muy;
+   wire [63:0] w_mmy = (w_mvx > w_mvy) ? w_mvx : w_mvy;
+   wire [63:0] w_M   = (w_mmx > w_mmy) ? w_mmx : w_mmy;       // max|A|, Q12
+   wire [81:0] w_fp  = w_M * r_s_wq4;                         // footprint_texels * 2^9
+   logic [6:0] w_msb;
+   always_comb begin
+      w_msb = 7'd0;
+      for(int i = 0; i < 82; i++) if(w_fp[i]) w_msb = i[6:0];
+   end
+   wire signed [8:0] w_lods = $signed({2'b0, w_msb}) - 9'sd9;  // log2 = msb + TEX_LW - 16
+   wire [2:0] w_lod = (w_lods < 0) ? 3'd0 : (w_lods > 9'sd7) ? 3'd7 : w_lods[2:0];
+
+   // ---- texel coordinate at mip level L = w_lod ----
    // texel coord = u*(TEX_W>>L); half-texel offset; base texel + Q(TEX_FB) frac.
    // L scales the shift (9+L) and the REPEAT wrap mask ((TEX_W>>L)-1).
-   wire [3:0]         w_sh   = TEX_FB[3:0] + {1'b0, r_lod};      // 9 + L
+   wire [3:0]         w_sh   = TEX_FB[3:0] + {1'b0, w_lod};      // 9 + L
    wire signed [31:0] w_half = $signed(32'd1) << (w_sh - 4'd1);  // 0.5 texel
    wire signed [31:0] w_su = $signed(r_s_u) - w_half;
    wire signed [31:0] w_sv = $signed(r_s_v) - w_half;
    wire signed [31:0] w_i0 = w_su >>> w_sh;
    wire signed [31:0] w_j0 = w_sv >>> w_sh;
-   wire [TEX_FB-1:0]  w_fx = w_su[{2'b0, r_lod} +: TEX_FB];     // frac bits above L
-   wire [TEX_FB-1:0]  w_fy = w_sv[{2'b0, r_lod} +: TEX_FB];
+   wire [TEX_FB-1:0]  w_fx = w_su[{2'b0, w_lod} +: TEX_FB];     // frac bits above L
+   wire [TEX_FB-1:0]  w_fy = w_sv[{2'b0, w_lod} +: TEX_FB];
    wire               w_px = w_i0[0];
    wire               w_py = w_j0[0];
    // REPEAT wrap within the level (low (TEX_LW-L) bits; L=0 wraps via 7-bit math)
-   wire [TEX_LW-1:0]  w_mask = (7'd1 << (TEX_LW[2:0] - r_lod)) - 7'd1;
+   wire [TEX_LW-1:0]  w_mask = (7'd1 << (TEX_LW[2:0] - w_lod)) - 7'd1;
    wire [TEX_LW-1:0] w_x0 = w_i0[TEX_LW-1:0] & w_mask;
    wire [TEX_LW-1:0] w_x1 = (w_i0[TEX_LW-1:0] + 1'b1) & w_mask;
    wire [TEX_LW-1:0] w_y0 = w_j0[TEX_LW-1:0] & w_mask;
@@ -369,10 +397,10 @@ module rasterize(clk, rst, go,
    wire [TEX_LW-1:0] w_colp1 = w_px ? w_x0 : w_x1;   // x-parity 1 column
    wire [TEX_LW-1:0] w_rowp0 = w_py ? w_y1 : w_y0;
    wire [TEX_LW-1:0] w_rowp1 = w_py ? w_y0 : w_y1;
-   wire [TEXB_AW-1:0] w_ab0 = {r_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab1 = {r_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab2 = {r_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab3 = {r_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab0 = {w_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab1 = {w_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab2 = {w_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+   wire [TEXB_AW-1:0] w_ab3 = {w_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
 
    // ---- texture: 4 banks split by (x&1,y&1) -> the 2x2 quad is 1 texel per
    // bank, so all four read in parallel.  Host loads linearly; route to bank
@@ -758,7 +786,6 @@ module rasterize(clk, rst, go,
 	     r_v1_y <= v1_y;
 	     r_v2_x <= v2_x;
 	     r_v2_y <= v2_y;
-	     r_lod  <= lod;
 	  end
      end
    

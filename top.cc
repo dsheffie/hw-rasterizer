@@ -128,18 +128,7 @@ static uint64_t render_triangle(Vrasterize *tb, const screen_tri &st) {
   tb->dcbdx    = (uint32_t)std::llround(Pcb.dadx   *CS) & COL_MASK;
   tb->dcbdy    = (uint32_t)std::llround(Pcb.dady   *CS) & COL_MASK;
 
-  // per-triangle mip LOD = 0.5*log2(texel-area / screen-area), clamped [0,7].
-  // (per-triangle approximation of the per-pixel uv Jacobian; A53 has the FP.)
-  double sa = 0.5 * std::fabs((double)(v1.x-v0.x)*(v2.y-v0.y) - (double)(v2.x-v0.x)*(v1.y-v0.y));
-  double ta = 0.5 * std::fabs((st.uv[1][0]-st.uv[0][0])*(st.uv[2][1]-st.uv[0][1])
-                            - (st.uv[2][0]-st.uv[0][0])*(st.uv[1][1]-st.uv[0][1]))
-                  * (double)texDim * (double)texDim;
-  int L = 0;
-  if(sa > 0.0 && ta > 0.0) {
-    long li = std::lround(0.5 * std::log2(ta / sa));
-    L = (li < 0) ? 0 : (li > texLevels-1 ? texLevels-1 : (int)li);
-  }
-  tb->lod = L;
+  // mip LOD is now computed per-pixel in hardware (analytic uv Jacobian).
 
   tb->go = 1; tick(tb); tb->go = 0;
   while(!tb->done) { tick(tb); ++ticks; }
@@ -233,7 +222,6 @@ int main(int argc, char *argv[]) {
   tb->clear = 0;
   tb->tex_we = 0;
   tb->tex_wbank = 0;
-  tb->lod = 0;
   tb->fb_raddr = 0;
   tb->x_dim = imageWidth;
   tb->y_dim = imageHeight;
