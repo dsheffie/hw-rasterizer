@@ -1,6 +1,6 @@
 UNAME_S = $(shell uname -s)
 
-OBJ = top.o hw_rast_verilated.o setup.o obj.o pipeline.o verilated.o
+OBJ = obj_demo.o gfx.o hw_rast_verilated.o setup.o obj.o pipeline.o verilated.o
 
 SV_SRC = rasterize.sv recip.sv
 
