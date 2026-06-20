@@ -2,13 +2,18 @@
 *.o
 *.d
 obj_dir/
+obj_dir_demo/
 obj_dir_recip/
 hw_rasterize
 recip_tb
 recip_seed.hex
 raster2d.ppm
+*_hw            # sgi-demos built against the engine (make <demo>_hw)
+irisgl_test_bin
 
 # render outputs
 frame_*.ppm
+frame[0-9]*.ppm  # headless demo dumps (frame0000.ppm, …)
+*_hw_cap.png     # demo framebuffer captures (docs/img/demos/ are committed)
 *.mp4
 *.gif

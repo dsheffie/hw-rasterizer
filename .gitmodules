@@ -1,0 +1,3 @@
+[submodule "sgi-demos"]
+	path = sgi-demos
+	url = https://github.com/sgi-demos/sgi-demos.git

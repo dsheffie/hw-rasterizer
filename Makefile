@@ -92,19 +92,23 @@ SGI_BIN   = bin-linux-x86_64
 GLES_DIR  = $(SGI)/libs/libgles
 GLES_LINK = -L$(GLES_DIR)/lib-linux -lGLESv2 -lEGL -Wl,-rpath,$(GLES_DIR)/lib-linux
 
+# Generic: `make <demo>_hw` builds any sgi-demos/demos/<demo> against our engine
+# (e.g. make ideas_hw, make logo_hw, make jello_hw).  Same recipe for every
+# demo: build it the repo's way, then re-link with our rasterizer ahead of
+# libgl.a.  `make ideas` is kept as a friendly alias for the original demo.
 .PHONY: ideas
 ideas: ideas_hw
 	@echo "built ideas_hw -- run: ./ideas_hw"
 
-ideas_hw: hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
-	$(MAKE) native -C $(SGI)/demos/ideas CC="$(SGI_CC)"
+%_hw: hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+	$(MAKE) native -C $(SGI)/demos/$* CC="$(SGI_CC)"
 	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo \
 	  hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc \
-	  $(SGI)/demos/ideas/$(SGI_BIN)/*.o \
+	  $(SGI)/demos/$*/$(SGI_BIN)/*.o \
 	  $(SGI)/libs/libdemo/$(SGI_BIN)/libdemo.a \
 	  obj_dir_demo/*.o verilated.o \
 	  $(SGI)/libs/libgl/$(SGI_BIN)/libgl.a \
-	  $(shell sdl2-config --libs) $(GLES_LINK) -lm -lpthread -o ideas_hw
+	  $(shell sdl2-config --libs) $(GLES_LINK) -lm -lpthread -o $@
 
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
