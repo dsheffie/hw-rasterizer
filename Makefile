@@ -149,7 +149,7 @@ tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_d
 	$(CXX) $(CXXFLAGS) $(TGL_INC) -Iobj_dir_demo \
 	  tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
 	  $$(ls $(TGL)/src/*.o | grep -vE 'ztriangle.o|zline.o') \
-	  obj_dir_demo/*.o verilated.o -lm -lpthread -o $@
+	  obj_dir_demo/*.o verilated.o $(shell sdl2-config --libs) -lm -lpthread -o $@
 
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test

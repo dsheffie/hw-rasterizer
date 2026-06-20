@@ -11,6 +11,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
 extern "C" {
 #include "GL/gl.h"
 #include "zbuffer.h"
@@ -139,11 +144,56 @@ static void initScene() {
   gear3 = glGenLists(1); glNewList(gear3, GL_COMPILE); glMaterialfv(GL_FRONT, GL_DIFFUSE, green); glColor3fv(green); gear(1.3, 2.0, 0.5, 10, 0.7); glEndList();
 }
 
+// Live SDL viewer: spin the gears, render each frame through the engine into an
+// on-screen framebuffer.  Esc/Q quit, Space pause.  Returns nonzero if SDL can't
+// open a window (e.g. headless).
+static int run_sdl(hw_rast *dev, int w, int h) {
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    fprintf(stderr, "SDL_Init failed: %s (no display?)\n", SDL_GetError());
+    return 1;
+  }
+  SDL_Window *win = SDL_CreateWindow("tgl_gears (HW engine)",
+      SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, 0);
+  SDL_Renderer *ren = SDL_CreateRenderer(win, -1, 0);
+  SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
+      SDL_TEXTUREACCESS_STREAMING, w, h);
+  static uint8_t rgb[640 * 480 * 3];
+
+  bool running = true, paused = false;
+  while (running) {
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+      if (ev.type == SDL_QUIT) running = false;
+      else if (ev.type == SDL_KEYDOWN) {
+        if (ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_q) running = false;
+        else if (ev.key.keysym.sym == SDLK_SPACE) paused = !paused;
+      }
+    }
+    if (!paused) angle += 2.0;
+    hw_clear(dev);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    draw();
+    hw_fb_read(dev, rgb);
+
+    SDL_UpdateTexture(tex, nullptr, rgb, w * 3);
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, nullptr, nullptr);
+    SDL_RenderPresent(ren);
+  }
+  SDL_DestroyTexture(tex);
+  SDL_DestroyRenderer(ren);
+  SDL_DestroyWindow(win);
+  SDL_Quit();
+  return 0;
+}
+
 int main(int argc, char **argv) {
   int w = 640, h = 480;
   int nframes = 1;
+  bool sdl = false;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--frames") && i + 1 < argc) nframes = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "--sdl")) sdl = true;
   }
 
   // our engine + a white texture so the texel*color modulate passes vertex color
@@ -172,6 +222,13 @@ int main(int argc, char **argv) {
   glTranslatef(0.0, 0.0, -45.0);
 
   initScene();
+
+  if (sdl) {
+    int rc = run_sdl(dev, w, h);
+    ZB_close(zb);
+    hw_close(dev);
+    return rc;
+  }
 
   static uint8_t rgb[640 * 480 * 3];
   for (int f = 0; f < nframes; f++) {
