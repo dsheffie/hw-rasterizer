@@ -87,13 +87,45 @@ and an explicitly out-of-scope future project (§9).
   state/clip/lighting pipeline, texture object management, display lists.
 - **Replaced:** `ztriangle.o` (the `ZB_fillTriangle*` fills) and `zline.o`
   (`ZB_line`/`ZB_plot`). We provide those 10 symbols in `tgl_engine.cc`.
-- **No TinyGL source edits.** The swap is purely at link time: build TinyGL minus
-  those two objects, link our symbols in their place. (Build TinyGL with clang and
-  no `-fopenmp`/`-march=native` for portability; OpenMP lived mostly in the
-  excluded rasterizer.)
+- **TinyGL: prefer no source edits** (keep it a clean, swappable library) — the
+  swap is purely at link time: build TinyGL minus those two objects, link our
+  symbols in their place. (Build TinyGL with clang and no `-fopenmp`/`-march=native`
+  for portability; OpenMP lived mostly in the excluded rasterizer.) Edit TinyGL
+  only if a workaround in the app or the seam is clearly worse.
 - **Clear / present** are driven at the harness level (`hw_clear` / `hw_fb_read`);
   TinyGL's own software framebuffer (`zb->pbuf`/`zbuf`) is allocated but unused —
   a small waste we'll stub away on the FPGA build.
+
+### Degrees of freedom: the application source is ours too
+
+GLQuake is **not** a fixed external dependency — `~/code/sdlquake` is our working
+copy and we will hack it freely. So the goal is **not** "implement a faithful GL
+that GLQuake happens to run on." The goal is "get GLQuake's geometry and textures
+to the seam," and we have three knobs, to be used in whatever combination is
+*simplest per feature*:
+
+1. **Reuse** TinyGL's pipeline (the default for transform/light/clip).
+2. **Edit GLQuake source** — delete or rewrite code paths rather than build API to
+   satisfy them.
+3. **Add an engine feature** — only when it's the genuinely right place (e.g.
+   perspective texturing, blend modes).
+
+This collapses a lot of the apparent surface. We do **not** need to faithfully
+support: multitexture/`SGIS`, the 8-bit shared-palette extension, vertex-array
+`EXT`s, gamma, DGA mouse, X vidmode switching, `glDrawBuffer` ztrick tricks, etc.
+Rather than carry null `PROC` stubs and rely on runtime guards, we just `#if 0` /
+delete those paths in the GLQuake source and force the simple branch. A missing or
+awkward GL call is a source edit in `gl_*.c`, not a new API obligation.
+
+Rule of thumb: **build API only for what's on the hot path and genuinely GL-shaped
+(triangles, textures, blend, depth). Everything else, hack around in the app.**
+
+**Platform/windowing code is ripped out wholesale.** Anything tied to X11, GLX,
+DGA, svgalib, VESA/vidmode, or any other host backend gets deleted and replaced
+with the *single simplest thing that works for us* — one SDL window + our engine
+present, period. We are not preserving portability across windowing systems; we
+target exactly one path. The same goes for CD audio, networking we don't use, and
+any `#ifdef` maze — collapse to the one branch we run.
 
 ### Seam data conventions (`ZBufferPoint` → engine)
 
@@ -118,7 +150,7 @@ most are covered. The gaps:
 | Trivial-exact | `glOrtho` (matrix + `glMultMatrixf`) | implement |
 | Wrappers | `glTexParameterf`→`…i`, `glTexEnvf`→`…i` | implement |
 | No-ops (engine has no equivalent / fixed behavior) | `glDepthFunc`, `glDepthRange`, `glAlphaFunc`, `glFogf/fv/i`, `glTexSubImage2D` | stub |
-| Extensions (runtime-guarded, never called when we report none) | `glColorTableEXT`, `glSelectTextureSGIS`, `glMTexCoord2fSGIS`, `glArrayElementEXT`, `glColorPointerEXT`, `glTexCoordPointerEXT`, `glVertexPointerEXT`, the `qgl*`/`PROC` pointers | define as null/no-op in the vid layer; force `gl_mtexable = false`, `is8bit = false` |
+| Extensions (multitexture / 8-bit palette / vertex arrays) | `glColorTableEXT`, `glSelectTextureSGIS`, `glMTexCoord2fSGIS`, `glArrayElementEXT`, `glColorPointerEXT`, `glTexCoordPointerEXT`, `glVertexPointerEXT`, the `qgl*`/`PROC` pointers | **delete the paths in the GLQuake source** (force `gl_mtexable`/`is8bit` false and `#if 0` the branches) rather than carry stubs |
 | Win32-only | `glCreateContext`, `glMakeCurrent`, `glGetProcAddress`, … | excluded on Linux (`#ifdef _WIN32`) — not referenced |
 | GLX | `glXChooseVisual`, `glX*` | replaced by the SDL vid (§6) — not compiled |
 
@@ -176,9 +208,14 @@ look right is the next engine-side work, all in `tgl_engine.cc`:
    additive-ish (particles, lightning).
 4. **Alpha test** (optional, later): grates/fences. Engine has none today; could
    add a texel-alpha kill, or accept solid.
-5. **Lightmaps** (later): Quake surfaces are `texture × lightmap`. Needs a multiply
-   blend / second texture pass and `glTexSubImage2D` to actually update — the
-   biggest "looks like Quake" item, deferred past first-light.
+5. **Lightmaps** (later): Quake surfaces are `texture × lightmap`. The faithful-GL
+   way needs a multiply blend / second texture pass + `glTexSubImage2D` updates.
+   But with source freedom there's a much cheaper route: **pre-multiply on the CPU**
+   in `gl_rsurf.c` — fold the lightmap into the surface texels (or into per-vertex
+   color) when building the draw, so a single modulated pass through the engine
+   already looks lit. No HW multitexture/multiply pass, no `glTexSubImage2D`. This
+   is the preferred first cut for "looks like Quake"; a HW lightmap pass is a later
+   optimization only if the CPU cost matters.
 
 ---
 
@@ -202,6 +239,13 @@ and must provide the exact symbol surface the rest of GLQuake links against:
   `GL_BeginRendering` returns `0,0,w,h`. `GL_EndRendering` → `hw_fb_read` → SDL
   present. `Sys_SendKeyEvents` → SDL event pump → `Key_Event` (+ mouse later).
 
+Per §3's degrees of freedom, we **shrink this surface by editing the source**, not
+by reproducing all of `gl_vidlinuxglx.c`: rip out gamma, DGA mouse, X vidmode
+switching, and the 8-bit palette path from the GLQuake side so the vid layer only
+has to provide the minimal window/context/present/input set above. Easiest is to
+start from the existing `vid_sdl.c` (the project already does SDL) rather than the
+GLX file.
+
 ---
 
 ## 7. GLQuake build (cross-repo)
@@ -221,9 +265,12 @@ Source + data live in `~/code/sdlquake` (full `gl_*.c` renderer; `id1/pak0.pak` 
   hw_rast_verilated verilated obj_dir_demo`). No GLU.
 - **Include order:** `-Itinygl/include` first so `<GL/gl.h>` resolves to TinyGL;
   `<GL/glu.h>` resolves to the system header (or a stub) — it links nothing.
-- **Open:** sdlquake is a separate working repo (has local files `va2pa.c`,
-  `reciplogger.cc` and the pak data) — decide submodule vs. path reference. Lean
-  path-reference for now; revisit.
+- **Vendoring (decided):** **fork sdlquake.** This effort hacks the source heavily
+  (rip out X11/GLX/DGA/vidmode, strip extensions, pre-multiply lightmaps, swap the
+  vid layer), so it gets its own fork we own and commit to, vendored into this repo
+  as a submodule. The fork carries the local files (`va2pa.c`, `reciplogger.cc`).
+  Pak data (`id1/pak0.pak`, `pak1.pak`) stays out of git (size/licensing) — kept
+  locally and pointed at by `-basedir`.
 
 Runtime expectations: cycle-accurate sim is slow (seconds per frame; a full Quake
 scene is heavy) — fine for correctness, not playability. First-light success =
@@ -277,8 +324,7 @@ On the Ultra96/ZU3EG:
    at `ZB_*` or one level up in `clip.c`.)
 2. **Texture residency** — Quake's texture set vs. finite engine texture memory:
    LRU/streaming, ties to the bandwidth plan.
-3. **sdlquake vendoring** — submodule vs. path reference (it carries local edits +
-   pak data).
+3. ~~sdlquake vendoring~~ **(decided: fork it, vendor as a submodule; see §7).**
 4. **GLU** — shim accepted; revisit only if a consumer needs NURBS/quadrics.
 5. **Lightmaps** — multiply second pass vs. multitexture; when to tackle.
 
@@ -287,7 +333,10 @@ On the Ultra96/ZU3EG:
 ## 11. Phasing
 
 1. **First light** — build GLQuake against TinyGL + engine, boot to a rendered
-   frame (untextured, no alpha test/fog/lightmap). Validates the whole stack.
+   frame (untextured, no alpha test/fog/lightmap). Includes **hacking the GLQuake
+   source** to strip the paths we don't support (multitexture, 8-bit palette,
+   gamma, DGA, vidmode) and force the simple branches, rather than building API for
+   them. Validates the whole stack.
 2. **Textured perspective fills** — wire `tgl_engine` texturing; world geometry
    gets its textures.
 3. **Blending** — src-over + additive mapped through; HUD, water, particles.
