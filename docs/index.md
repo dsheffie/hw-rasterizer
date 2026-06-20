@@ -78,3 +78,4 @@ for the walkthrough.*
 8. [The hardware pipeline](hardware-pipeline.html)
 9. [Toward miniGL](toward-minigl.html)
 10. [Running the SGI demos](running-the-sgi-demos.html) — real IRIS GL demos on the engine
+11. [Real OpenGL via TinyGL](opengl-via-tinygl.html) — GLGears on the engine; the path to GLQuake
