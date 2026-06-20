@@ -10,10 +10,12 @@ recip_seed.hex
 raster2d.ppm
 *_hw            # sgi-demos built against the engine (make <demo>_hw)
 irisgl_test_bin
+tgl_gears        # TinyGL gears on the engine (make tgl_gears)
 
 # render outputs
 frame_*.ppm
 frame[0-9]*.ppm  # headless demo dumps (frame0000.ppm, …)
+tgl_gears*.ppm   # TinyGL gears frame dumps
 *_hw_cap.png     # demo framebuffer captures (docs/img/demos/ are committed)
 *.mp4
 *.gif

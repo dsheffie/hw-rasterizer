@@ -1,3 +1,6 @@
 [submodule "sgi-demos"]
 	path = sgi-demos
 	url = https://github.com/sgi-demos/sgi-demos.git
+[submodule "tinygl"]
+	path = tinygl
+	url = https://github.com/C-Chads/tinygl.git

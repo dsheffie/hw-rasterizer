@@ -130,6 +130,27 @@ ideas: ideas_hw
 	  $(shell sdl2-config --libs) $(GLES_LINK) -lm -lpthread -o $@
 	$(GLES_FIXUP)
 
+# --- TinyGL backend (a real OpenGL-subset front-end on our engine) ---
+# TinyGL does transform / lighting / clipping (incl. near-plane); we replace its
+# software rasterizer (ZB_* in ztriangle.o/zline.o) with tgl_engine.cc, which
+# feeds screen-space triangles to our engine.  Build TinyGL with clang and no
+# OpenMP/march=native (portable; the perf-critical rasterizer is excluded anyway).
+TGL      = tinygl
+TGL_INC  = -I$(TGL)/include
+TGL_CFLAGS = -Wall -O3 -std=c99 -DNDEBUG -Wno-unused-function
+
+.PHONY: tgl_lib
+tgl_lib:
+	$(MAKE) -C $(TGL)/src clean
+	$(MAKE) -C $(TGL)/src CC=clang-14 CFLAGS_LIB="$(TGL_CFLAGS)"
+
+# `make tgl_gears` -> TinyGL gears rendered on our engine (PPM dump)
+tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o tgl_lib
+	$(CXX) $(CXXFLAGS) $(TGL_INC) -Iobj_dir_demo \
+	  tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
+	  $$(ls $(TGL)/src/*.o | grep -vE 'ztriangle.o|zline.o') \
+	  obj_dir_demo/*.o verilated.o -lm -lpthread -o $@
+
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
 recip_test: recip_tb recip_seed.hex
