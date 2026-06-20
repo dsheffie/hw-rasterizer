@@ -28,6 +28,7 @@ ifeq ($(UNAME_S),Darwin)
 	VERILATOR_FST = /Users/dsheffie/local/share/verilator/include/verilated_fst_c.cpp
 	VERILATOR_DPI_INC = /Users/dsheffie/local/share/verilator/include/vltstd/
 	VERILATOR = /Users/dsheffie/local/bin/verilator
+	SDL_CFLAGS = $(shell sdl2-config --cflags)
 	EXTRA_LD = -L/opt/local/lib -lboost_program_options-mt -lboost_serialization-mt -lcapstone -lSDL2
 endif
 
@@ -87,10 +88,28 @@ irisgl_test_bin: rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup
 # against OUR rasterizer: placing hw_rasterizer ahead of libgl.a means the
 # linker resolves rasterizer_* from us and never pulls reference_rasterizer.o.
 SGI       = sgi-demos
-SGI_CC    = clang-14
-SGI_BIN   = bin-linux-x86_64
+# Platform suffix, matching sgi-demos/makefiles/platform.mk: bin-<os>-<arch>.
+# (Linux x86_64 -> bin-linux-x86_64; Apple Silicon -> bin-mac-arm64.)
+SGI_OS   := $(shell uname -s | sed 's/Darwin/mac/;s/Linux/linux/')
+SGI_HW   := $(shell uname -m)
+SGI_BIN   = bin-$(SGI_OS)-$(SGI_HW)
+# Linux needs clang-14 (the repo's C90 + warn-off flags assume clang, not gcc);
+# on mac the default cc IS clang, so use it.
+SGI_CC    = $(if $(filter mac,$(SGI_OS)),clang,clang-14)
 GLES_DIR  = $(SGI)/libs/libgles
-GLES_LINK = -L$(GLES_DIR)/lib-linux -lGLESv2 -lEGL -Wl,-rpath,$(GLES_DIR)/lib-linux
+GLES_LIB  = $(GLES_DIR)/lib-$(SGI_OS)
+GLES_LINK = -L$(GLES_LIB) -lGLESv2 -lEGL -Wl,-rpath,$(GLES_LIB)
+
+# macOS only: the prebuilt GLES dylibs ship with install name "./libX.dylib", so
+# rewrite our re-linked binary to find them via @rpath (upstream does this for
+# its own binary via GLES_INSTALL; our re-link bypasses that step).  No-op on Linux.
+ifeq ($(SGI_OS),mac)
+define GLES_FIXUP
+	for d in libGLESv2.dylib libEGL.dylib; do install_name_tool -change ./$$d @rpath/$$d $@; done
+endef
+else
+GLES_FIXUP =
+endif
 
 # Generic: `make <demo>_hw` builds any sgi-demos/demos/<demo> against our engine
 # (e.g. make ideas_hw, make logo_hw, make jello_hw).  Same recipe for every
@@ -109,6 +128,7 @@ ideas: ideas_hw
 	  obj_dir_demo/*.o verilated.o \
 	  $(SGI)/libs/libgl/$(SGI_BIN)/libgl.a \
 	  $(shell sdl2-config --libs) $(GLES_LINK) -lm -lpthread -o $@
+	$(GLES_FIXUP)
 
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
