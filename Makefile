@@ -151,6 +151,41 @@ tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_d
 	  $$(ls $(TGL)/src/*.o | grep -vE 'ztriangle.o|zline.o') \
 	  obj_dir_demo/*.o verilated.o $(shell sdl2-config --libs) -lm -lpthread -o $@
 
+# --- GLQuake on the engine (TinyGL front-end + our rasterizer) ---
+# Quake source lives in a separate fork (clean SDLquake 1.0.9 base, GL path).
+QUAKE_DIR ?= /home/dsheffie/code/sdlquake-glhw
+QUAKE_CC   = clang-14
+# quake C: K&R-ish gnu89, warnings off; GLQUAKE switches headers to the GL flavor.
+# -fcommon: Quake is pre-C99 and relies on tentative definitions in headers
+# (sb_lines, skytexturenum, ...); modern clang defaults to -fno-common.
+QUAKE_CFLAGS = -O1 -g -DSDL -DGLQUAKE -std=gnu89 -w -fno-strict-aliasing -fcommon \
+  -I$(QUAKE_DIR) -I. -I$(TGL)/include -Iquake_compat $(SDL_CFLAGS)
+QUAKE_SRCS = cl_demo cl_input cl_main cl_parse cl_tent chase cmd common console \
+  crc cvar host host_cmd keys mathlib menu net_main net_loop net_dgrm net_udp \
+  net_bsd net_vcr pr_cmds pr_edict pr_exec sbar sv_main sv_move sv_phys sv_user \
+  view wad world zone cd_sdl snd_dma snd_mem snd_mix snd_sdl sys_sdl r_part \
+  gl_draw gl_mesh gl_model gl_refrag gl_rlight gl_rmain gl_rmisc gl_rsurf \
+  gl_screen gl_warp gl_vid_tinygl
+QUAKE_OBJ = $(patsubst %,quake_obj/%.o,$(QUAKE_SRCS))
+
+quake_obj:
+	mkdir -p quake_obj
+
+quake_obj/%.o: $(QUAKE_DIR)/%.c | quake_obj tgl_lib
+	$(QUAKE_CC) $(QUAKE_CFLAGS) -c $< -o $@
+
+# our GL compat stubs (C): glOrtho / glTexParameterf etc. that TinyGL lacks
+tgl_quake_compat.o: tgl_quake_compat.c
+	$(QUAKE_CC) -O2 -g -std=c99 -w $(TGL_INC) -Iquake_compat -c $< -o $@
+
+quake: $(QUAKE_OBJ) tgl_quake_compat.o tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
+       obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+	$(CXX) $(CXXFLAGS) -Iobj_dir_demo $(TGL_INC) \
+	  tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
+	  $(QUAKE_OBJ) tgl_quake_compat.o \
+	  $$(ls $(TGL)/src/*.o | grep -vE 'ztriangle.o|zline.o') \
+	  obj_dir_demo/*.o verilated.o $(shell sdl2-config --libs) -lm -lpthread -o quake
+
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
 recip_test: recip_tb recip_seed.hex

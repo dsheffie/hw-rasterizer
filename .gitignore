@@ -11,11 +11,14 @@ raster2d.ppm
 *_hw            # sgi-demos built against the engine (make <demo>_hw)
 irisgl_test_bin
 tgl_gears        # TinyGL gears on the engine (make tgl_gears)
+quake            # GLQuake on the engine (make quake)
+quake_obj/       # GLQuake object files
 
 # render outputs
 frame_*.ppm
 frame[0-9]*.ppm  # headless demo dumps (frame0000.ppm, …)
 tgl_gears*.ppm   # TinyGL gears frame dumps
+quake_frame*.png # GLQuake captured frames
 *_hw_cap.png     # demo framebuffer captures (docs/img/demos/ are committed)
 *.mp4
 *.gif

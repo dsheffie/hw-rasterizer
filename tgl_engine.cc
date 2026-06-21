@@ -35,6 +35,9 @@ static inline int32_t map_depth(GLint z) {
 // zp.r/g/b are ~v*0xfe0000 fixed point; the 8-bit color is the top byte.
 static inline uint8_t col8(GLint c) { return (uint8_t)((c >> 16) & 0xff); }
 
+// per-frame heartbeat stats (read+reset by the vid layer each GL_EndRendering)
+extern "C" { long tgl_tris = 0; long tgl_culls = 0; }
+
 static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *c) {
   if (!g_dev) return;
   ZBufferPoint *vin[3] = {a, b, c};
@@ -53,12 +56,13 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   // our coverage needs positive screen area; fix winding (swap v1,v2)
   long area = (long)(pos[1][0]-pos[0][0])*(pos[2][1]-pos[0][1])
             - (long)(pos[2][0]-pos[0][0])*(pos[1][1]-pos[0][1]);
-  if (area == 0) return;
+  if (area == 0) { tgl_culls++; return; }
   if (area < 0) {
     for (int k = 0; k < 3; k++) { int32_t t = pos[1][k]; pos[1][k] = pos[2][k]; pos[2][k] = t; }
     for (int k = 0; k < 3; k++) { uint8_t t = col[1][k]; col[1][k] = col[2][k]; col[2][k] = t; }
   }
   uint8_t z_enable = zb->depth_test ? 1 : 0;
+  tgl_tris++;
   submit_triangle(g_dev, pos, uv, invw, col, 0 /*opaque*/, 255, z_enable);
 }
 
