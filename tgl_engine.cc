@@ -36,15 +36,80 @@ static inline int32_t map_depth(GLint z) {
 static inline uint8_t col8(GLint c) { return (uint8_t)((c >> 16) & 0xff); }
 
 // per-frame heartbeat stats (read+reset by the vid layer each GL_EndRendering)
-extern "C" { long tgl_tris = 0; long tgl_culls = 0; }
+extern "C" { long tgl_tris = 0; long tgl_culls = 0; long tgl_texloads = 0; }
 
-static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *c) {
+// --- texture residency ---------------------------------------------------
+// The engine has ONE texture memory; TinyGL/Quake bind hundreds of textures.
+// We keep the engine's texture RAM holding whatever was used last and reload
+// only on change.  Untextured fills use a solid-white texture so the engine's
+// GL_MODULATE (texel*color) reduces to pure vertex color.
+#define TEXDIM 128                         // must match RTL TEX_W
+static const void *g_resident = 0;         // key of texture currently in engine RAM
+static const void *const WHITE_KEY = (const void*)1;
+
+static void ensure_white() {
+  if (g_resident == WHITE_KEY) return;
+  static uint8_t white[TEXDIM*TEXDIM*3];
+  static bool init = false;
+  if (!init) { for (size_t i = 0; i < sizeof(white); i++) white[i] = 0xff; init = true; }
+  load_texture(g_dev, white, TEXDIM);
+  g_resident = WHITE_KEY;
+  tgl_texloads++;
+}
+
+// Downsample TinyGL's 256^2 PIXEL (0xAARRGGBB) pixmap to a 128^2 RGB base and
+// upload it (load_texture builds the mip chain).  Reloads only on change.
+static void ensure_texture(const PIXEL *pm) {
+  if (g_resident == pm) return;
+  static uint8_t rgb[TEXDIM*TEXDIM*3];
+  const int SRC = TGL_FEATURE_TEXTURE_DIM;   // 256
+  for (int y = 0; y < TEXDIM; y++)
+    for (int x = 0; x < TEXDIM; x++) {
+      unsigned r = 0, g = 0, b = 0;
+      for (int dy = 0; dy < 2; dy++)
+        for (int dx = 0; dx < 2; dx++) {
+          PIXEL p = pm[(2*y+dy)*SRC + (2*x+dx)];
+          r += (p >> 16) & 0xff; g += (p >> 8) & 0xff; b += p & 0xff;
+        }
+      int o = (y*TEXDIM + x)*3;
+      rgb[o] = r >> 2; rgb[o+1] = g >> 2; rgb[o+2] = b >> 2;
+    }
+  load_texture(g_dev, rgb, TEXDIM);
+  g_resident = pm;
+  tgl_texloads++;
+}
+
+// Normalized texture coordinate from TinyGL's fixed-point zp.s / zp.t
+// (clip.c: zp.s = texcoord * (S_MAX-S_MIN) + S_MIN).
+static const float S_DEN = 1.0f / (float)(ZB_POINT_S_MAX - ZB_POINT_S_MIN);
+static const float T_DEN = 1.0f / (float)(ZB_POINT_T_MAX - ZB_POINT_T_MIN);
+
+static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *c,
+                   bool textured) {
   if (!g_dev) return;
   ZBufferPoint *vin[3] = {a, b, c};
   int32_t pos[3][3];
-  float   uv[3][2] = {{0,0},{0,0},{0,0}};   // untextured (white texture bound)
-  float   invw[3]  = {1.0f, 1.0f, 1.0f};
+  float   uv[3][2];
+  float   invw[3];
   uint8_t col[3][3];
+
+  if (textured) {
+    // zp.z (TinyGL screen depth, near=large) is affine in 1/w, so it is the
+    // perspective denominator: u = interp(uv*z)/interp(z) reproduces TinyGL's
+    // own ss = sz/z exactly.  Per-triangle normalize by zmax (cancels in the
+    // ratio) to keep 1/w near O(1) for the fixed-point setup.
+    long zmax = 1;
+    for (int i = 0; i < 3; i++) if (vin[i]->z > zmax) zmax = vin[i]->z;
+    float izmax = 1.0f / (float)zmax;
+    for (int i = 0; i < 3; i++) {
+      uv[i][0] = (float)(vin[i]->s - ZB_POINT_S_MIN) * S_DEN;
+      uv[i][1] = (float)(vin[i]->t - ZB_POINT_T_MIN) * T_DEN;
+      invw[i]  = (float)vin[i]->z * izmax;
+    }
+  } else {
+    for (int i = 0; i < 3; i++) { uv[i][0] = uv[i][1] = 0.0f; invw[i] = 1.0f; }
+  }
+
   for (int i = 0; i < 3; i++) {
     pos[i][0] = vin[i]->x * 32;            // whole-pixel -> our sub-pixel (x32)
     pos[i][1] = vin[i]->y * 32;            // zp.y is already top-down
@@ -60,6 +125,8 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   if (area < 0) {
     for (int k = 0; k < 3; k++) { int32_t t = pos[1][k]; pos[1][k] = pos[2][k]; pos[2][k] = t; }
     for (int k = 0; k < 3; k++) { uint8_t t = col[1][k]; col[1][k] = col[2][k]; col[2][k] = t; }
+    for (int k = 0; k < 2; k++) { float t = uv[1][k]; uv[1][k] = uv[2][k]; uv[2][k] = t; }
+    { float t = invw[1]; invw[1] = invw[2]; invw[2] = t; }
   }
   uint8_t z_enable = zb->depth_test ? 1 : 0;
   tgl_tris++;
@@ -73,30 +140,36 @@ static void line_quad(ZBuffer *zb, ZBufferPoint *v0, ZBufferPoint *v1) {
   int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
   if (ax >= ay) { q[1].y += 1; q[2].y += 1; }      // mostly horizontal: thicken in y
   else          { q[1].x += 1; q[2].x += 1; }      // mostly vertical:   thicken in x
-  submit(zb, &q[0], &q[1], &q[2]);
-  submit(zb, &q[2], &q[3], &q[0]);
+  submit(zb, &q[0], &q[1], &q[2], false);
+  submit(zb, &q[2], &q[3], &q[0], false);
+}
+
+// textured fill: make the bound texture resident, then submit with uv + 1/w.
+static void submit_tex(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) {
+  if (zb->current_texture) { ensure_texture(zb->current_texture); submit(zb, p0, p1, p2, true); }
+  else                     { ensure_white();                      submit(zb, p0, p1, p2, false); }
 }
 
 extern "C" {
 
-void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
-void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
-void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
-void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
-// textured fills: routed untextured for now (gears is untextured).  TODO: upload
-// the bound texture to the engine and carry perspective u/v + 1/w.
-void ZB_fillTriangleMappingPerspective       (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
-void ZB_fillTriangleMappingPerspectiveNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit(zb,p0,p1,p2); }
+void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
+void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
+void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
+void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
+// textured fills: upload the bound texture and carry perspective u/v + 1/w.
+void ZB_fillTriangleMappingPerspective       (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2); }
+void ZB_fillTriangleMappingPerspectiveNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2); }
 
 void ZB_setTexture(ZBuffer *zb, PIXEL *texture) { zb->current_texture = texture; }
 
-void ZB_line  (ZBuffer *zb, ZBufferPoint *p1, ZBufferPoint *p2) { line_quad(zb, p1, p2); }
-void ZB_line_z(ZBuffer *zb, ZBufferPoint *p1, ZBufferPoint *p2) { line_quad(zb, p1, p2); }
+void ZB_line  (ZBuffer *zb, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); line_quad(zb, p1, p2); }
+void ZB_line_z(ZBuffer *zb, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); line_quad(zb, p1, p2); }
 void ZB_plot  (ZBuffer *zb, ZBufferPoint *p) {
+  ensure_white();
   ZBufferPoint q[4] = {*p, *p, *p, *p};
   q[1].y += 1; q[2].x += 1; q[2].y += 1; q[3].x += 1;
-  submit(zb, &q[0], &q[1], &q[2]);
-  submit(zb, &q[2], &q[3], &q[0]);
+  submit(zb, &q[0], &q[1], &q[2], false);
+  submit(zb, &q[2], &q[3], &q[0], false);
 }
 
 } // extern "C"

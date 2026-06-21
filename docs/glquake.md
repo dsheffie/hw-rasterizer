@@ -5,22 +5,34 @@ nav_order: 13
 
 # GLQuake on the engine
 
-The north star — **GLQuake runs on the hardware rasterizer.** It boots through
-full init, loads a map, spawns entities, meshes the models, and renders the 3D
-world: the BSP geometry, the player's weapon viewmodel, and the alias-model
-monsters — all depth-tested, at ~2,300 triangles per frame through the engine.
+The north star — **GLQuake runs on the hardware rasterizer, textured.** It boots
+through full init, loads a map, spawns entities, meshes the models, and renders
+the 3D world: the BSP geometry, the player's weapon viewmodel, and the
+alias-model monsters — all **perspective-correct textured** and depth-tested, at
+~2,300 triangles per frame through the engine.
 
-![GLQuake start map on the engine](img/demos/quake-start.png)
+![GLQuake start map, textured, on the engine](img/demos/quake-textured.png)
 
-*The `start` map. White because it's **untextured so far** (every surface is the
-white default texture modulated by vertex color); the geometry, depth occlusion,
-and the weapon viewmodel are all real engine output. The thin lines are surface
-edges showing through the flat-white fill.*
+*The `start` map with real textures — brick/stone walls, the tiled floor, the
+"QUAKE" sign, the fire texture, and the weapon viewmodel — every pixel sampled
+and modulated by the engine. Perspective-correct (the sign reads straight up the
+wall). It's dark because there are **no lightmaps yet**: each surface is its base
+texture modulated by per-vertex light color, not the texture × lightmap GLQuake
+normally multiplies in a second pass.*
+
+### How we got here (a progress log)
+
+The same geometry, a few steps back. First it rendered **untextured** — flat
+white modulated by vertex color. The geometry, depth occlusion, and the weapon
+viewmodel were already real engine output; textures were the missing piece (the
+thin lines are surface edges showing through the flat fill):
+
+![GLQuake start map, untextured](img/demos/quake-start.png)
+
+And an alias-model entity (the shaded sphere) dropping into the scene with its
+own depth and shading — proof the model path worked before textures did:
 
 ![GLQuake with an entity model](img/demos/quake-entities.png)
-
-*A few frames later — an alias-model entity (the shaded sphere) renders in the
-scene with its own depth and shading.*
 
 ## How it's wired
 
@@ -40,6 +52,27 @@ submodule. The only real new file is `gl_vid_tinygl.c` — an SDL2 + TinyGL +
 engine video layer replacing the original X11/GLX one. See the
 [miniGL design doc](minigl-design.html) for the full plan.
 
+## Texturing: capture, residency, and a free perspective denominator
+
+The engine has **one** texture memory; Quake binds hundreds of textures. So
+`tgl_engine.cc` keeps a *residency* cache: it tracks which texture is loaded and
+re-uploads only when the bound texture changes. Quake draws by texture chains, so
+in practice that's ~24 uploads per frame (visible in the `texloads` heartbeat),
+not one per triangle.
+
+The texture data comes straight from TinyGL: GLQuake uploads `GL_RGBA` images,
+TinyGL stores each as a 256² pixmap, and at draw time hands us the bound texture
+via `ZB_setTexture`. We box-downsample that to the engine's 128² and let
+`load_texture` build the mip chain.
+
+The neat part is perspective correctness. TinyGL's screen depth `zp.z` (near =
+large) is *affine in 1/w*, so it already **is** the perspective denominator —
+TinyGL's own texturing computes `s·z ÷ z`. We feed the engine per-vertex
+normalized `u,v` (decoded from `zp.s/zp.t`) and `invw = zp.z` (normalized per
+triangle to keep the fixed-point setup well-conditioned). The engine's
+`interp(u·z)/interp(z)` then reproduces TinyGL's mapping exactly — no projection
+matrix to peek at, no extra clip-space data to carry.
+
 ## Build and run
 
 ```sh
@@ -58,15 +91,14 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
 ```
 
 The **heartbeat** turned out to be the key diagnostic — it prints triangles
-rasterized per frame, which instantly distinguishes a black loading screen from
-the real world view and confirms geometry is reaching the engine:
+rasterized (and now texture uploads) per frame, which instantly distinguishes a
+black loading screen from the real world view and confirms geometry is reaching
+the engine:
 
 ```
-[hb] frame 39:     0 tris      ← loading screen (nothing drawn)
-[hb] frame 40:     0 tris
-[hb] frame 41:  2313 tris      ← the 3D world appears
-[hb] frame 45:  2308 tris
-[hb] frame 55:  2415 tris
+[hb] frame 40:     0 tris,    0 texloads   ← loading screen (nothing drawn)
+[hb] frame 41:  2313 tris,   24 texloads   ← the 3D world appears
+[hb] frame 45:  2308 tris,   24 texloads
 ```
 
 ## Learnings (the hard-won bugs)
@@ -108,12 +140,12 @@ garbage. **Fix:** enable `GL_POLYGON` and raise `POLYGON_MAX_VERTEX` to 256.
 
 GLQuake uploads `GL_RGBA`, mipmapped, arbitrarily-sized textures and binds
 *hundreds* of integer texture names without `glGenTextures`. TinyGL only accepts
-`GL_RGB`/level-0/256², and allocates a 256 KB `GLTexture` per bound name. Left
-alone it fatals on the first upload, then (once tolerated) OOMs on the binds.
-Since the engine renders untextured for now, the pragmatic fix was to make
-TinyGL's `glTexImage2D` *tolerate* the unsupported combinations (no-op) and have
-binding **reuse a single shared texture object**. Wiring real texture capture into
-the engine is the next milestone.
+`GL_RGB`/level-0/256². The fix was to teach TinyGL's `glTexImage2D` to accept
+`GL_RGBA` (strip the alpha) at level 0 and ignore the mip levels — it already
+resizes any size to 256², so the stored pixmap is exactly what we sample. Each
+bound name gets its own `GLTexture` so its pixmap pointer is a stable key for the
+engine-side residency cache. (The mip chain GLQuake uploads is discarded; the
+engine builds its own.)
 
 ### Meta-lesson
 
@@ -125,8 +157,10 @@ than any single debugger session for localizing them.
 ## Status & next
 
 - ✅ Boots, loads maps, renders the world + viewmodel + entity models, depth-tested.
-- ◻️ **Untextured** (white) — *next:* capture TinyGL's bound textures into the
-  engine's texture memory and feed perspective u/v + 1/w, taking Quake from white
-  to fully textured.
-- ◻️ Then **blending** (src-over / additive) and **lightmaps** (CPU-side
-  pre-multiply, per the [design doc](minigl-design.html)).
+- ✅ **Textured** — perspective-correct, with engine-side texture residency.
+- ◻️ **Lightmaps** — *next:* GLQuake darkens surfaces with a second texture ×
+  lightmap pass; we currently render only the base texture, so the world is too
+  dark. CPU-side pre-multiply (texture × lightmap into one image) fits the
+  single-texture engine, per the [design doc](minigl-design.html).
+- ◻️ Then **blending** (src-over / additive) for translucent surfaces, particles,
+  and the sky.
