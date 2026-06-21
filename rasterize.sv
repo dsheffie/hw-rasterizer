@@ -465,8 +465,13 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   // depth test; when z_enable is off, every covered fragment passes (painter's)
-   wire w_zpass     = r_z1_valid & (~r_z_enable | (r_z1_depth < r_z1_zold));
+   // depth test; when z_enable is off, every covered fragment passes (painter's).
+   // blended passes (mode != 0) use <= so a coplanar overlay (e.g. the lightmap
+   // pass, same geometry as the base pass) passes the equal-depth test; opaque
+   // uses strict < to avoid coplanar z-fighting.
+   wire w_zle       = (r_blend_mode != 2'd0);
+   wire w_zpass     = r_z1_valid & (~r_z_enable | (w_zle ? (r_z1_depth <= r_z1_zold)
+						        : (r_z1_depth <  r_z1_zold)));
    wire w_frag_wr   = w_pipe_en & w_zpass;     // commit this fragment
 
    // depth BRAM: clear takes priority, else conditional depth write; one read
@@ -520,6 +525,7 @@ module rasterize(clk, rst, go,
 	      s = {1'b0, src} + {1'b0, dst};
 	      blend_c = s[8] ? 8'd255 : s[7:0];
 	   end
+	   2'd3: blend_c = mul255(src, dst);                           // modulate (e.g. lightmaps)
 	   default: blend_c = src;                                     // opaque
 	 endcase
       end

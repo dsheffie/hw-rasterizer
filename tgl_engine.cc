@@ -84,8 +84,19 @@ static void ensure_texture(const PIXEL *pm) {
 static const float S_DEN = 1.0f / (float)(ZB_POINT_S_MAX - ZB_POINT_S_MIN);
 static const float T_DEN = 1.0f / (float)(ZB_POINT_T_MAX - ZB_POINT_T_MIN);
 
+// Map TinyGL's glBlendFunc(sfactor,dfactor) to an engine blend mode.  The
+// lightmap pass is glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR) over an
+// un-inverted lightmap (see texture.c) -> a plain modulate (dst*src).
+static uint8_t blend_mode_from(ZBuffer *zb) {
+  GLenum s = zb->sfactor, d = zb->dfactor;
+  if (s == GL_ZERO      && d == GL_ONE_MINUS_SRC_COLOR) return 3;  // modulate (lightmaps)
+  if (s == GL_ONE       && d == GL_ONE)                 return 2;  // additive
+  if (s == GL_SRC_ALPHA && d == GL_ONE_MINUS_SRC_ALPHA) return 1;  // src-over
+  return 1;                                                        // default: src-over
+}
+
 static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *c,
-                   bool textured) {
+                   bool textured, uint8_t blend_mode) {
   if (!g_dev) return;
   ZBufferPoint *vin[3] = {a, b, c};
   int32_t pos[3][3];
@@ -114,9 +125,11 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
     pos[i][0] = vin[i]->x * 32;            // whole-pixel -> our sub-pixel (x32)
     pos[i][1] = vin[i]->y * 32;            // zp.y is already top-down
     pos[i][2] = map_depth(vin[i]->z);
-    col[i][0] = col8(vin[i]->r);
-    col[i][1] = col8(vin[i]->g);
-    col[i][2] = col8(vin[i]->b);
+    // modulate (lightmap) pass is texture-only: force white so the engine's
+    // texel*color reduces to the lightmap texel, then blend dst*lightmap.
+    col[i][0] = blend_mode == 3 ? 255 : col8(vin[i]->r);
+    col[i][1] = blend_mode == 3 ? 255 : col8(vin[i]->g);
+    col[i][2] = blend_mode == 3 ? 255 : col8(vin[i]->b);
   }
   // our coverage needs positive screen area; fix winding (swap v1,v2)
   long area = (long)(pos[1][0]-pos[0][0])*(pos[2][1]-pos[0][1])
@@ -130,7 +143,7 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   }
   uint8_t z_enable = zb->depth_test ? 1 : 0;
   tgl_tris++;
-  submit_triangle(g_dev, pos, uv, invw, col, 0 /*opaque*/, 255, z_enable);
+  submit_triangle(g_dev, pos, uv, invw, col, blend_mode, 255, z_enable);
 }
 
 // 1px-ish line/point -> quad (2 triangles), like the IRIS GL backend.
@@ -140,25 +153,28 @@ static void line_quad(ZBuffer *zb, ZBufferPoint *v0, ZBufferPoint *v1) {
   int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
   if (ax >= ay) { q[1].y += 1; q[2].y += 1; }      // mostly horizontal: thicken in y
   else          { q[1].x += 1; q[2].x += 1; }      // mostly vertical:   thicken in x
-  submit(zb, &q[0], &q[1], &q[2], false);
-  submit(zb, &q[2], &q[3], &q[0], false);
+  submit(zb, &q[0], &q[1], &q[2], false, 0);
+  submit(zb, &q[2], &q[3], &q[0], false, 0);
 }
 
 // textured fill: make the bound texture resident, then submit with uv + 1/w.
-static void submit_tex(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) {
-  if (zb->current_texture) { ensure_texture(zb->current_texture); submit(zb, p0, p1, p2, true); }
-  else                     { ensure_white();                      submit(zb, p0, p1, p2, false); }
+// 'blend' = the BLEND fill variant (GL_BLEND on); pick the engine mode from the
+// active glBlendFunc (the lightmap pass -> modulate).
+static void submit_tex(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2, bool blend) {
+  uint8_t mode = blend ? blend_mode_from(zb) : 0;
+  if (zb->current_texture) { ensure_texture(zb->current_texture); submit(zb, p0, p1, p2, true,  mode); }
+  else                     { ensure_white();                      submit(zb, p0, p1, p2, false, mode); }
 }
 
 extern "C" {
 
-void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
-void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
-void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
-void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false); }
+void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
+void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
+void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
+void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
 // textured fills: upload the bound texture and carry perspective u/v + 1/w.
-void ZB_fillTriangleMappingPerspective       (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2); }
-void ZB_fillTriangleMappingPerspectiveNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2); }
+void ZB_fillTriangleMappingPerspective       (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2,true);  }
+void ZB_fillTriangleMappingPerspectiveNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2,false); }
 
 void ZB_setTexture(ZBuffer *zb, PIXEL *texture) { zb->current_texture = texture; }
 
@@ -168,8 +184,8 @@ void ZB_plot  (ZBuffer *zb, ZBufferPoint *p) {
   ensure_white();
   ZBufferPoint q[4] = {*p, *p, *p, *p};
   q[1].y += 1; q[2].x += 1; q[2].y += 1; q[3].x += 1;
-  submit(zb, &q[0], &q[1], &q[2], false);
-  submit(zb, &q[2], &q[3], &q[0], false);
+  submit(zb, &q[0], &q[1], &q[2], false, 0);
+  submit(zb, &q[2], &q[3], &q[0], false, 0);
 }
 
 } // extern "C"

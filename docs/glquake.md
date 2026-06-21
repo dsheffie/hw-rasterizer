@@ -5,27 +5,33 @@ nav_order: 13
 
 # GLQuake on the engine
 
-The north star — **GLQuake runs on the hardware rasterizer, textured.** It boots
-through full init, loads a map, spawns entities, meshes the models, and renders
-the 3D world: the BSP geometry, the player's weapon viewmodel, and the
-alias-model monsters — all **perspective-correct textured** and depth-tested, at
-~2,300 triangles per frame through the engine.
+The north star — **GLQuake runs on the hardware rasterizer, textured and
+lightmapped.** It boots through full init, loads a map, spawns entities, meshes
+the models, and renders the 3D world: the BSP geometry, the player's weapon
+viewmodel, and the alias-model monsters — all **perspective-correct textured**,
+**lightmapped**, and depth-tested, at ~2,300 triangles per frame through the
+engine.
 
-![GLQuake start map, textured, on the engine](img/demos/quake-textured.png)
+![GLQuake start map, textured + lightmapped, on the engine](img/demos/quake-lightmapped.png)
 
-*The `start` map with real textures — brick/stone walls, the tiled floor, the
-"QUAKE" sign, the fire texture, and the weapon viewmodel — every pixel sampled
-and modulated by the engine. Perspective-correct (the sign reads straight up the
-wall). It's dark because there are **no lightmaps yet**: each surface is its base
-texture modulated by per-vertex light color, not the texture × lightmap GLQuake
-normally multiplies in a second pass.*
+*The `start` map with textures **and** baked lighting — note the pools of light
+on the floor, the falloff up the walls, and the shadowed recesses and ceiling.
+Every pixel is the base texture, sampled and perspective-corrected by the engine,
+then multiplied by Quake's lightmap in a second pass — exactly how GLQuake lit
+the world on a 3dfx Voodoo.*
 
 ### How we got here (a progress log)
 
-The same geometry, a few steps back. First it rendered **untextured** — flat
-white modulated by vertex color. The geometry, depth occlusion, and the weapon
-viewmodel were already real engine output; textures were the missing piece (the
-thin lines are surface edges showing through the flat fill):
+The same camera, a few steps back. With textures but **before lightmaps**, the
+world was uniformly dim — every surface its base texture with no baked light, so
+no sense of depth from the lighting:
+
+![GLQuake start map, textured but unlit](img/demos/quake-textured.png)
+
+Before that it rendered **untextured** — flat white modulated by vertex color.
+The geometry, depth occlusion, and the weapon viewmodel were already real engine
+output; textures were the missing piece (the thin lines are surface edges showing
+through the flat fill):
 
 ![GLQuake start map, untextured](img/demos/quake-start.png)
 
@@ -72,6 +78,37 @@ normalized `u,v` (decoded from `zp.s/zp.t`) and `invw = zp.z` (normalized per
 triangle to keep the fixed-point setup well-conditioned). The engine's
 `interp(u·z)/interp(z)` then reproduces TinyGL's mapping exactly — no projection
 matrix to peek at, no extra clip-space data to carry.
+
+## Lightmaps: a second multiply pass
+
+GLQuake lights the world with **lightmaps** — low-res baked-light textures, one
+luxel per ~16 surface texels. With `gl_texsort` on (the default), the world is
+drawn in two passes: `DrawTextureChains` lays down every base texture opaque,
+then `R_BlendLightmaps` re-draws the same surfaces sampling the lightmap and
+*multiplying* it into what's already in the framebuffer
+(`glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR)`). That's how GLQuake ran on a
+single-texture Voodoo, and it's exactly our engine's situation: **one** texture
+unit, so we do the same two passes.
+
+Three small pieces made it work:
+
+1. **A modulate blend mode.** The engine had opaque / src-over / additive; we
+   added mode 3 = `dst · src` (`rasterize.sv`). Quake stores lightmaps *inverted*
+   (`255 − light`) and blends with `ONE_MINUS_SRC_COLOR`; we un-invert on upload
+   instead, so a plain multiply gives `dst · light`.
+2. **`<=` depth for the overlay.** The lightmap pass is the *same geometry* as
+   the base pass, so its fragments land at exactly equal depth. The opaque test
+   is strict `<` (no coplanar z-fighting); blended passes use `<=` so the overlay
+   passes. (Only opaque writes depth, matching GLQuake's `glDepthMask(0)` for the
+   lightmap pass.) This one line is why lightmaps appear at all — before it, the
+   coplanar pass was silently killed by the depth test.
+3. **LUMINANCE upload.** Lightmaps arrive as single-channel `GL_LUMINANCE`;
+   TinyGL now accepts that, expanding to gray and un-inverting in one step.
+
+`tgl_engine.cc` picks the engine blend mode from TinyGL's `glBlendFunc` state
+(`zb->sfactor/dfactor`), so the lightmap multiply, additive glows, and alpha
+blends each map to the right mode. Static lighting only for now — Quake's dynamic
+light updates go through `glTexSubImage2D`, which we don't yet honor.
 
 ## Build and run
 
@@ -158,9 +195,9 @@ than any single debugger session for localizing them.
 
 - ✅ Boots, loads maps, renders the world + viewmodel + entity models, depth-tested.
 - ✅ **Textured** — perspective-correct, with engine-side texture residency.
-- ◻️ **Lightmaps** — *next:* GLQuake darkens surfaces with a second texture ×
-  lightmap pass; we currently render only the base texture, so the world is too
-  dark. CPU-side pre-multiply (texture × lightmap into one image) fits the
-  single-texture engine, per the [design doc](minigl-design.html).
-- ◻️ Then **blending** (src-over / additive) for translucent surfaces, particles,
-  and the sky.
+- ✅ **Lightmapped** — the base-texture × lightmap multiply pass, via a new
+  engine modulate blend mode and a `<=` depth test for the coplanar overlay.
+- ◻️ **Dynamic lights** — torches/explosions update lightmaps through
+  `glTexSubImage2D` (currently a no-op), so lighting is static for now.
+- ◻️ **Blending polish** — translucent water/glass alpha (per-vertex alpha isn't
+  carried yet) and the scrolling sky.
