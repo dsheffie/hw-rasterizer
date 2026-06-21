@@ -152,8 +152,8 @@ tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_d
 	  obj_dir_demo/*.o verilated.o $(shell sdl2-config --libs) -lm -lpthread -o $@
 
 # --- GLQuake on the engine (TinyGL front-end + our rasterizer) ---
-# Quake source lives in a separate fork (clean SDLquake 1.0.9 base, GL path).
-QUAKE_DIR ?= /home/dsheffie/code/sdlquake-glhw
+# Quake source: the hwrast-sdlquake submodule (clean SDLquake 1.0.9 base, GL path).
+QUAKE_DIR ?= hwrast-sdlquake
 QUAKE_CC   = clang-14
 # quake C: K&R-ish gnu89, warnings off; GLQUAKE switches headers to the GL flavor.
 # -fcommon: Quake is pre-C99 and relies on tentative definitions in headers

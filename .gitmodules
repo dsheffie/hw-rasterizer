@@ -3,4 +3,9 @@
 	url = https://github.com/sgi-demos/sgi-demos.git
 [submodule "tinygl"]
 	path = tinygl
-	url = https://github.com/C-Chads/tinygl.git
+	url = https://github.com/dsheffie/tinygl.git
+	branch = hw-rasterizer-patches
+[submodule "hwrast-sdlquake"]
+	path = hwrast-sdlquake
+	url = https://github.com/dsheffie/hwrast-sdlquake.git
+	branch = main
