@@ -64,3 +64,6 @@ It renders at 640×480 on the (Verilated) engine. The same backend is the seam w
 point GLQuake at next — TinyGL becomes the in-tree "miniGL" driver, and the only
 remaining engine-side work is wiring textured perspective fills and the blend
 modes through `tgl_engine.cc`.
+
+**Next:** [GLQuake on the engine](glquake.html) — the same TinyGL backend, now
+running Quake's world.
