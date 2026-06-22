@@ -107,8 +107,35 @@ Three small pieces made it work:
 
 `tgl_engine.cc` picks the engine blend mode from TinyGL's `glBlendFunc` state
 (`zb->sfactor/dfactor`), so the lightmap multiply, additive glows, and alpha
-blends each map to the right mode. Static lighting only for now — Quake's dynamic
-light updates go through `glTexSubImage2D`, which we don't yet honor.
+blends each map to the right mode.
+
+### Dynamic lights
+
+Flickering torches, muzzle flashes, and explosions don't rebuild geometry —
+GLQuake recomputes the affected lightmap luxels each frame and pushes just the
+changed rows with `glTexSubImage2D`. We now honor that: `glTexSubImage2D` writes
+the new rows into the bound lightmap's pixmap (same 2× upscale + un-invert as the
+full upload). Because the base-texture pass evicts every lightmap from the
+engine's single texture memory each frame, the lightmap pass already re-uploads
+each atlas every frame — so an updated atlas reaches the engine automatically,
+no cache invalidation needed.
+
+The `HW_STATS` heartbeat gained an `lm_updates` count (lightmap sub-uploads per
+frame). It sits at 0 in a static scene and spikes during combat:
+
+```
+[hb] frame 107: 2294 tris, ... 0 lm_updates
+[hb] frame 108: 1994 tris, ... 3 lm_updates   ← muzzle flash / dynamic lights
+```
+
+The effect is a scene that lights up where the action is — same geometry, same
+camera, different light:
+
+![Before a dynamic light](img/demos/quake-dynamic-before.png)
+![During a dynamic light flash](img/demos/quake-dynamic-after.png)
+
+*Two consecutive demo frames: the corridor ahead brightens as a dynamic light
+flares (3 lightmap atlases updated that frame), then fades.*
 
 ## Build and run
 
@@ -197,7 +224,7 @@ than any single debugger session for localizing them.
 - ✅ **Textured** — perspective-correct, with engine-side texture residency.
 - ✅ **Lightmapped** — the base-texture × lightmap multiply pass, via a new
   engine modulate blend mode and a `<=` depth test for the coplanar overlay.
-- ◻️ **Dynamic lights** — torches/explosions update lightmaps through
-  `glTexSubImage2D` (currently a no-op), so lighting is static for now.
+- ✅ **Dynamic lights** — `glTexSubImage2D` lightmap updates take effect, so
+  torches flicker and muzzle flashes / explosions light the scene.
 - ◻️ **Blending polish** — translucent water/glass alpha (per-vertex alpha isn't
   carried yet) and the scrolling sky.

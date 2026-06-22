@@ -36,7 +36,8 @@ static inline int32_t map_depth(GLint z) {
 static inline uint8_t col8(GLint c) { return (uint8_t)((c >> 16) & 0xff); }
 
 // per-frame heartbeat stats (read+reset by the vid layer each GL_EndRendering)
-extern "C" { long tgl_tris = 0; long tgl_culls = 0; long tgl_texloads = 0; }
+extern "C" { long tgl_tris = 0; long tgl_culls = 0; long tgl_texloads = 0;
+             long tgl_lm_updates = 0; /* glTexSubImage2D calls (dynamic lightmaps) */ }
 
 // --- texture residency ---------------------------------------------------
 // The engine has ONE texture memory; TinyGL/Quake bind hundreds of textures.

@@ -42,18 +42,14 @@ void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
   glTexEnvi(target, pname, (GLint)param);
 }
 
-// no-ops: our engine fixes the depth test (<) and has no alpha test / fog;
-// lightmap sub-uploads are dropped (lightmaps stay at their initial upload).
+// no-ops: our engine has no alpha test / fog.  (glTexSubImage2D is now real --
+// see tinygl/src/texture.c -- so dynamic lightmap updates take effect.)
 void glDepthFunc(GLenum func) { (void)func; }
 void glDepthRange(GLdouble n, GLdouble f) { (void)n; (void)f; }   /* GLclampd absent in TinyGL */
 void glAlphaFunc(GLenum func, GLfloat ref) { (void)func; (void)ref; }  /* GLclampf absent */
 void glFogf(GLenum p, GLfloat v) { (void)p; (void)v; }
 void glFogi(GLenum p, GLint v) { (void)p; (void)v; }
 void glFogfv(GLenum p, const GLfloat *v) { (void)p; (void)v; }
-void glTexSubImage2D(GLenum target, GLint level, GLint xoff, GLint yoff,
-                     GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void *px) {
-  (void)target;(void)level;(void)xoff;(void)yoff;(void)w;(void)h;(void)fmt;(void)type;(void)px;
-}
 
 // --- GLU helpers ---
 
