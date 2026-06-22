@@ -44,7 +44,7 @@ EXE = hw_rasterize
 
 all: $(EXE)
 
-$(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a recip_seed.hex
+$(EXE) : $(OBJ) obj_dir/Vrasterize__ALL.a
 	$(CXX) $(CXXFLAGS) $(OBJ) obj_dir/*.o $(LIBS) -o $(EXE)
 
 hw_rast_verilated.o: hw_rast_verilated.cc hw_rast.h obj_dir/Vrasterize__ALL.a
@@ -80,7 +80,7 @@ obj_dir_demo/Vrasterize__ALL.a : $(SV_SRC)
 irisgl_test: irisgl_test_bin
 	./irisgl_test_bin
 
-irisgl_test_bin: rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+irisgl_test_bin: rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a verilated.o
 	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo rast_test.cc hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/*.o verilated.o -lpthread $(shell pkg-config --libs sdl2) -o irisgl_test_bin
 
 # Run a real SGI/IRIS GL demo (ideas) on our engine.  We build the demo the
@@ -119,7 +119,7 @@ endif
 ideas: ideas_hw
 	@echo "built ideas_hw -- run: ./ideas_hw"
 
-%_hw: hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+%_hw: hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc obj_dir_demo/Vrasterize__ALL.a verilated.o
 	$(MAKE) native -C $(SGI)/demos/$* CC="$(SGI_CC)"
 	$(CXX) $(CXXFLAGS) $(SGI_INC) -Iobj_dir_demo \
 	  hw_rasterizer.cc gfx.cc hw_rast_verilated.cc setup.cc \
@@ -145,7 +145,7 @@ tgl_lib:
 	$(MAKE) -C $(TGL)/src CC=clang-14 CFLAGS_LIB="$(TGL_CFLAGS)"
 
 # `make tgl_gears` -> TinyGL gears rendered on our engine (PPM dump)
-tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o tgl_lib
+tgl_gears: tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc obj_dir_demo/Vrasterize__ALL.a verilated.o tgl_lib
 	$(CXX) $(CXXFLAGS) $(TGL_INC) -Iobj_dir_demo \
 	  tgl_gears.cc tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
 	  $$(ls $(TGL)/src/*.o | grep -vE 'ztriangle.o|zline.o') \
@@ -179,7 +179,7 @@ tgl_quake_compat.o: tgl_quake_compat.c
 	$(QUAKE_CC) -O2 -g -std=c99 -w $(TGL_INC) -Iquake_compat -c $< -o $@
 
 quake: $(QUAKE_OBJ) tgl_quake_compat.o tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
-       obj_dir_demo/Vrasterize__ALL.a recip_seed.hex verilated.o
+       obj_dir_demo/Vrasterize__ALL.a verilated.o
 	$(CXX) $(CXXFLAGS) -Iobj_dir_demo $(TGL_INC) \
 	  tgl_engine.cc gfx.cc setup.cc hw_rast_verilated.cc \
 	  $(QUAKE_OBJ) tgl_quake_compat.o \
@@ -188,12 +188,8 @@ quake: $(QUAKE_OBJ) tgl_quake_compat.o tgl_engine.cc gfx.cc setup.cc hw_rast_ver
 
 # standalone reciprocal module + bit-exact testbench
 .PHONY: recip_test
-recip_test: recip_tb recip_seed.hex
+recip_test: recip_tb
 	./recip_tb
-
-# seed ROM: entry i = round(65536 / (1 + (i+0.5)/256)), matches init_recip_seed
-recip_seed.hex:
-	python3 -c "import math; print('\n'.join('%x'%int(math.floor(65536.0/(1.0+(i+0.5)/256.0)+0.5)) for i in range(256)))" > $@
 
 obj_dir_recip/Vrecip__ALL.a : recip.sv
 	$(VERILATOR) --x-assign unique -cc recip.sv --Mdir obj_dir_recip
