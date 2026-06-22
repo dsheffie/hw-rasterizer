@@ -108,15 +108,21 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   if (textured) {
     // zp.z (TinyGL screen depth, near=large) is affine in 1/w, so it is the
     // perspective denominator: u = interp(uv*z)/interp(z) reproduces TinyGL's
-    // own ss = sz/z exactly.  Per-triangle normalize by zmax (cancels in the
-    // ratio) to keep 1/w near O(1) for the fixed-point setup.
-    long zmax = 1;
-    for (int i = 0; i < 3; i++) if (vin[i]->z > zmax) zmax = vin[i]->z;
-    float izmax = 1.0f / (float)zmax;
+    // own ss = sz/z exactly.  Normalize per-triangle by *zmin* so the smallest
+    // invw is 1 (the divide is scale-invariant, so the result is unchanged).
+    // Normalizing by zmax instead pushes the far vertex's invw toward 0, and
+    // small lightmap UVs (~0.1) then underflow uv*invw to 0 in Q12 fixed point,
+    // sampling garbage luxels -> hard black triangles on distant surfaces.
+    long zmin = vin[0]->z;
+    for (int i = 1; i < 3; i++) if (vin[i]->z < zmin) zmin = vin[i]->z;
+    if (zmin < 1) zmin = 1;
+    float izmin = 1.0f / (float)zmin;
     for (int i = 0; i < 3; i++) {
       uv[i][0] = (float)(vin[i]->s - ZB_POINT_S_MIN) * S_DEN;
       uv[i][1] = (float)(vin[i]->t - ZB_POINT_T_MIN) * T_DEN;
-      invw[i]  = (float)vin[i]->z * izmax;
+      float iw = (float)vin[i]->z * izmin;     // >= 1
+      if (iw > 262144.0f) iw = 262144.0f;      // clamp so iw_start (Q12) stays in int32
+      invw[i] = iw;
     }
   } else {
     for (int i = 0; i < 3; i++) { uv[i][0] = uv[i][1] = 0.0f; invw[i] = 1.0f; }

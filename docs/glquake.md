@@ -211,12 +211,33 @@ bound name gets its own `GLTexture` so its pixmap pointer is a stable key for th
 engine-side residency cache. (The mip chain GLQuake uploads is discarded; the
 engine builds its own.)
 
+### 4. Lightmaps and a fixed-point underflow
+
+The first lightmapped build had hard **black triangular wedges** on distant
+walls and floors. Rendering with `r_fullbright 1` (no lightmap pass) was clean,
+so the bug was in the lightmap pass — and it tracked grazing angles, the
+fingerprint of a precision problem.
+
+The engine interpolates `u/w`, `t/w`, `1/w` and divides per pixel; we feed it
+`invw = zp.z` normalized per triangle. The original normalization divided by
+`zmax`, which drives the *far* vertex's `invw` toward 0. Base-texture UVs are
+large (Quake tiles textures), so they survived; but a surface's **lightmap** UVs
+are tiny (its luxels are a small patch of the 128² atlas), and `uv·invw` then
+underflowed the Q12 fixed-point to 0 — a garbage texture coordinate that sampled
+the wrong (often black) luxel, per triangle, hence the hard edges.
+
+The fix is a one-liner: normalize by `zmin` instead, so the smallest `invw` is 1.
+The perspective divide is scale-invariant, so the *result* is unchanged — only
+the fixed-point conditioning improves, and the small lightmap UVs survive.
+
 ### Meta-lesson
 
-Two of three show-stoppers were **a small mismatch crashing somewhere far away**
-(a truncated offset → VM segfault; a vertex overflow → texture-bind crash). A
-cheap, always-available signal — the per-frame triangle count — was worth more
-than any single debugger session for localizing them.
+Three of four show-stoppers were **a small mismatch surfacing somewhere far away**
+(a truncated offset → VM segfault; a vertex overflow → texture-bind crash; a
+fixed-point underflow → black triangles). Cheap, always-available signals — the
+per-frame triangle/texload/lm_update counts, and one-flag toggles like
+`r_fullbright` to bisect the pipeline — were worth more than any single debugger
+session for localizing them.
 
 ## Status & next
 
