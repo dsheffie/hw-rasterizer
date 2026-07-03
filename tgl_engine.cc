@@ -97,7 +97,7 @@ static uint8_t blend_mode_from(ZBuffer *zb) {
 }
 
 static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *c,
-                   bool textured, uint8_t blend_mode) {
+                   bool textured, uint8_t blend_mode, uint8_t alpha) {
   if (!g_dev) return;
   ZBufferPoint *vin[3] = {a, b, c};
   int32_t pos[3][3];
@@ -108,21 +108,23 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   if (textured) {
     // zp.z (TinyGL screen depth, near=large) is affine in 1/w, so it is the
     // perspective denominator: u = interp(uv*z)/interp(z) reproduces TinyGL's
-    // own ss = sz/z exactly.  Normalize per-triangle by *zmin* so the smallest
-    // invw is 1 (the divide is scale-invariant, so the result is unchanged).
-    // Normalizing by zmax instead pushes the far vertex's invw toward 0, and
-    // small lightmap UVs (~0.1) then underflow uv*invw to 0 in Q12 fixed point,
-    // sampling garbage luxels -> hard black triangles on distant surfaces.
-    long zmin = vin[0]->z;
-    for (int i = 1; i < 3; i++) if (vin[i]->z < zmin) zmin = vin[i]->z;
-    if (zmin < 1) zmin = 1;
-    float izmin = 1.0f / (float)zmin;
+    // own ss = sz/z exactly.  Scale zp.z (range [0, TGL_ZSIZE=2^30]) by a single
+    // GLOBAL constant into iw in [0, 2^18], which in the engine's Q12 fixed point
+    // (iw_start is 18.12, int32) exactly fills the range without overflow.
+    //
+    // The scale must be GLOBAL (same for every triangle), NOT per-triangle: with
+    // a per-triangle normalization, two triangles sharing a floor edge scale that
+    // edge's iw by different factors, so Q12 quantizes it differently on each side
+    // -> a visible seam/kink where the shared perspective mapping should be
+    // continuous (worst on large grazing floor polys).  A global scale also never
+    // divides by a per-triangle extreme, so the far vertex's iw never collapses to
+    // ~0 (which, with tiny lightmap UVs, underflowed uv*iw to 0 in Q12 -> garbage
+    // luxels -> hard black triangles -- the failure mode of the old zmax scheme).
+    const float GSCALE = (float)(1 << 18) / (float)TGL_ZSIZE;   // = 1/4096
     for (int i = 0; i < 3; i++) {
       uv[i][0] = (float)(vin[i]->s - ZB_POINT_S_MIN) * S_DEN;
       uv[i][1] = (float)(vin[i]->t - ZB_POINT_T_MIN) * T_DEN;
-      float iw = (float)vin[i]->z * izmin;     // >= 1
-      if (iw > 262144.0f) iw = 262144.0f;      // clamp so iw_start (Q12) stays in int32
-      invw[i] = iw;
+      invw[i] = (float)vin[i]->z * GSCALE;
     }
   } else {
     for (int i = 0; i < 3; i++) { uv[i][0] = uv[i][1] = 0.0f; invw[i] = 1.0f; }
@@ -150,7 +152,7 @@ static void submit(ZBuffer *zb, ZBufferPoint *a, ZBufferPoint *b, ZBufferPoint *
   }
   uint8_t z_enable = zb->depth_test ? 1 : 0;
   tgl_tris++;
-  submit_triangle(g_dev, pos, uv, invw, col, blend_mode, 255, z_enable);
+  submit_triangle(g_dev, pos, uv, invw, col, blend_mode, alpha, z_enable);
 }
 
 // 1px-ish line/point -> quad (2 triangles), like the IRIS GL backend.
@@ -160,25 +162,36 @@ static void line_quad(ZBuffer *zb, ZBufferPoint *v0, ZBufferPoint *v1) {
   int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
   if (ax >= ay) { q[1].y += 1; q[2].y += 1; }      // mostly horizontal: thicken in y
   else          { q[1].x += 1; q[2].x += 1; }      // mostly vertical:   thicken in x
-  submit(zb, &q[0], &q[1], &q[2], false, 0);
-  submit(zb, &q[2], &q[3], &q[0], false, 0);
+  submit(zb, &q[0], &q[1], &q[2], false, 0, 255);
+  submit(zb, &q[2], &q[3], &q[0], false, 0, 255);
 }
 
 // textured fill: make the bound texture resident, then submit with uv + 1/w.
 // 'blend' = the BLEND fill variant (GL_BLEND on); pick the engine mode from the
 // active glBlendFunc (the lightmap pass -> modulate).
 static void submit_tex(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2, bool blend) {
-  uint8_t mode = blend ? blend_mode_from(zb) : 0;
-  if (zb->current_texture) { ensure_texture(zb->current_texture); submit(zb, p0, p1, p2, true,  mode); }
-  else                     { ensure_white();                      submit(zb, p0, p1, p2, false, mode); }
+  uint8_t mode  = blend ? blend_mode_from(zb) : 0;
+  uint8_t alpha = blend ? (uint8_t)(p0->a & 0xff) : 255;   // src-over (mode 1) only; other modes ignore it
+  if (zb->current_texture) { ensure_texture(zb->current_texture); submit(zb, p0, p1, p2, true,  mode, alpha); }
+  else                     { ensure_white();                      submit(zb, p0, p1, p2, false, mode, alpha); }
 }
 
 extern "C" {
 
-void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
-void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
-void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
-void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { ensure_white(); submit(zb,p0,p1,p2,false,0); }
+// Untextured fills.  The non-NOBLEND variants are only reached with GL_BLEND on
+// (clip.c gl_draw_triangle_fill), so map the active glBlendFunc to an engine mode
+// and carry the source alpha (Quake's screen polyblend = src-over; flashblend
+// dlight coronas = additive).  NOBLEND stays opaque.
+static void submit_flat(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2, bool blend) {
+  ensure_white();
+  uint8_t mode  = blend ? blend_mode_from(zb) : 0;
+  uint8_t alpha = blend ? (uint8_t)(p0->a & 0xff) : 255;
+  submit(zb, p0, p1, p2, false, mode, alpha);
+}
+void ZB_fillTriangleFlat        (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_flat(zb,p0,p1,p2,true);  }
+void ZB_fillTriangleFlatNOBLEND (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_flat(zb,p0,p1,p2,false); }
+void ZB_fillTriangleSmooth      (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_flat(zb,p0,p1,p2,true);  }
+void ZB_fillTriangleSmoothNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_flat(zb,p0,p1,p2,false); }
 // textured fills: upload the bound texture and carry perspective u/v + 1/w.
 void ZB_fillTriangleMappingPerspective       (ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2,true);  }
 void ZB_fillTriangleMappingPerspectiveNOBLEND(ZBuffer *zb, ZBufferPoint *p0, ZBufferPoint *p1, ZBufferPoint *p2) { submit_tex(zb,p0,p1,p2,false); }
@@ -191,8 +204,8 @@ void ZB_plot  (ZBuffer *zb, ZBufferPoint *p) {
   ensure_white();
   ZBufferPoint q[4] = {*p, *p, *p, *p};
   q[1].y += 1; q[2].x += 1; q[2].y += 1; q[3].x += 1;
-  submit(zb, &q[0], &q[1], &q[2], false, 0);
-  submit(zb, &q[2], &q[3], &q[0], false, 0);
+  submit(zb, &q[0], &q[1], &q[2], false, 0, 255);
+  submit(zb, &q[2], &q[3], &q[0], false, 0, 255);
 }
 
 } // extern "C"
