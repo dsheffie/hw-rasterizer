@@ -359,40 +359,154 @@ module rasterize(clk, rst, go,
 	  end
      end
 
-   // ---- per-pixel level of detail (analytic uv Jacobian) ----
+   // ---- feed-forward pipeline after SHIFT (no stalls: every stage takes the
+   // same always-on enable).  The arithmetic is unchanged; only the register
+   // boundaries moved, so the image is bit-identical:
+   //   L1  u,v x (dw/dx, dw/dy) products        L2  Jacobian |A| max
+   //   L3  footprint multiply  L3B (DSP regs)    L4  LOD (priority encode)
+   //   A   texel address / fractions             Z1  texture + depth + dst reads
+   //   Z2  read data registered (RAM out regs)   B1  bilinear x-lerps, depth test
+   //   B2  bilinear y-lerp
+   //   C   GL_MODULATE                           D   blend; write color + depth
+   // Reads issue at A and writes land at D, which is safe because the pipe
+   // drains between triangles and a triangle never visits a pixel twice. ----
+
+   // L1: per-pixel level of detail, the four u/v x Wx/Wy products
    // du/dx = w*(Px - u*Wx) etc., with Px=dswdx... (Q12), u,v in Q16, w carried
-   // as w*16 (r_s_wq4).  A_* = (deriv)*2^12; LOD = log2(TEX_W * w * max|A|).
-   wire signed [63:0] w_uWx = ($signed(r_s_u) * $signed(diwdx)) >>> 16;
-   wire signed [63:0] w_uWy = ($signed(r_s_u) * $signed(diwdy)) >>> 16;
-   wire signed [63:0] w_vWx = ($signed(r_s_v) * $signed(diwdx)) >>> 16;
-   wire signed [63:0] w_vWy = ($signed(r_s_v) * $signed(diwdy)) >>> 16;
-   wire signed [63:0] w_Aux = $signed({{16{dswdx[SW_W-1]}}, dswdx}) - w_uWx;
-   wire signed [63:0] w_Auy = $signed({{16{dswdy[SW_W-1]}}, dswdy}) - w_uWy;
-   wire signed [63:0] w_Avx = $signed({{16{dtwdx[SW_W-1]}}, dtwdx}) - w_vWx;
-   wire signed [63:0] w_Avy = $signed({{16{dtwdy[SW_W-1]}}, dtwdy}) - w_vWy;
+   // as w*16 (wq4).  A_* = (deriv)*2^12; LOD = log2(TEX_W * w * max|A|).
+   logic              r_l1_valid;
+   logic [31:0]       r_l1_addr;
+   logic [Z_W-1:0]    r_l1_depth;
+   logic [23:0]       r_l1_col;
+   logic [17:0]       r_l1_wq4;
+   logic [31:0]       r_l1_u, r_l1_v;
+   logic signed [63:0] r_l1_uWx, r_l1_uWy, r_l1_vWx, r_l1_vWy;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_l1_valid <= 1'b0;
+	else if(w_pipe_en) r_l1_valid <= r_s_valid;
+	if(w_pipe_en)
+	  begin
+	     r_l1_addr  <= r_s_addr;
+	     r_l1_depth <= r_s_depth;
+	     r_l1_col   <= r_s_col;
+	     r_l1_wq4   <= r_s_wq4;
+	     r_l1_u     <= r_s_u;
+	     r_l1_v     <= r_s_v;
+	     r_l1_uWx   <= ($signed(r_s_u) * $signed(diwdx)) >>> 16;
+	     r_l1_uWy   <= ($signed(r_s_u) * $signed(diwdy)) >>> 16;
+	     r_l1_vWx   <= ($signed(r_s_v) * $signed(diwdx)) >>> 16;
+	     r_l1_vWy   <= ($signed(r_s_v) * $signed(diwdy)) >>> 16;
+	  end
+     end
+
+   // L2: A = P - uW, |A|, max over the four
+   wire signed [63:0] w_Aux = $signed({{16{dswdx[SW_W-1]}}, dswdx}) - r_l1_uWx;
+   wire signed [63:0] w_Auy = $signed({{16{dswdy[SW_W-1]}}, dswdy}) - r_l1_uWy;
+   wire signed [63:0] w_Avx = $signed({{16{dtwdx[SW_W-1]}}, dtwdx}) - r_l1_vWx;
+   wire signed [63:0] w_Avy = $signed({{16{dtwdy[SW_W-1]}}, dtwdy}) - r_l1_vWy;
    wire [63:0] w_mux = w_Aux[63] ? (~w_Aux + 64'd1) : w_Aux;
    wire [63:0] w_muy = w_Auy[63] ? (~w_Auy + 64'd1) : w_Auy;
    wire [63:0] w_mvx = w_Avx[63] ? (~w_Avx + 64'd1) : w_Avx;
    wire [63:0] w_mvy = w_Avy[63] ? (~w_Avy + 64'd1) : w_Avy;
    wire [63:0] w_mmx = (w_mux > w_muy) ? w_mux : w_muy;
    wire [63:0] w_mmy = (w_mvx > w_mvy) ? w_mvx : w_mvy;
-   wire [63:0] w_M   = (w_mmx > w_mmy) ? w_mmx : w_mmy;       // max|A|, Q12
-   wire [81:0] w_fp  = w_M * r_s_wq4;                         // footprint_texels * 2^9
+   logic              r_l2_valid;
+   logic [31:0]       r_l2_addr;
+   logic [Z_W-1:0]    r_l2_depth;
+   logic [23:0]       r_l2_col;
+   logic [17:0]       r_l2_wq4;
+   logic [31:0]       r_l2_u, r_l2_v;
+   logic [63:0]       r_l2_M;                                  // max|A|, Q12
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_l2_valid <= 1'b0;
+	else if(w_pipe_en) r_l2_valid <= r_l1_valid;
+	if(w_pipe_en)
+	  begin
+	     r_l2_addr  <= r_l1_addr;
+	     r_l2_depth <= r_l1_depth;
+	     r_l2_col   <= r_l1_col;
+	     r_l2_wq4   <= r_l1_wq4;
+	     r_l2_u     <= r_l1_u;
+	     r_l2_v     <= r_l1_v;
+	     r_l2_M     <= (w_mmx > w_mmy) ? w_mmx : w_mmy;
+	  end
+     end
+
+   // L3, L3B: footprint = max|A| * w, two register stages so the DSP cascade
+   // can use its internal pipeline registers
+   logic              r_l3_valid, r_l3b_valid;
+   logic [31:0]       r_l3_addr, r_l3b_addr;
+   logic [Z_W-1:0]    r_l3_depth, r_l3b_depth;
+   logic [23:0]       r_l3_col, r_l3b_col;
+   logic [31:0]       r_l3_u, r_l3_v, r_l3b_u, r_l3b_v;
+   logic [81:0]       r_l3_fp, r_l3b_fp;                       // footprint_texels * 2^9
+   always_ff@(posedge clk)
+     begin
+	if(rst)
+	  begin
+	     r_l3_valid  <= 1'b0;
+	     r_l3b_valid <= 1'b0;
+	  end
+	else if(w_pipe_en)
+	  begin
+	     r_l3_valid  <= r_l2_valid;
+	     r_l3b_valid <= r_l3_valid;
+	  end
+	if(w_pipe_en)
+	  begin
+	     r_l3_addr   <= r_l2_addr;
+	     r_l3_depth  <= r_l2_depth;
+	     r_l3_col    <= r_l2_col;
+	     r_l3_u      <= r_l2_u;
+	     r_l3_v      <= r_l2_v;
+	     r_l3_fp     <= r_l2_M * r_l2_wq4;
+	     r_l3b_addr  <= r_l3_addr;
+	     r_l3b_depth <= r_l3_depth;
+	     r_l3b_col   <= r_l3_col;
+	     r_l3b_u     <= r_l3_u;
+	     r_l3b_v     <= r_l3_v;
+	     r_l3b_fp    <= r_l3_fp;
+	  end
+     end
+
+   // L4: LOD = clamp(msb(footprint) - 9, 0, 7)
    logic [6:0] w_msb;
    always_comb begin
       w_msb = 7'd0;
-      for(int i = 0; i < 82; i++) if(w_fp[i]) w_msb = i[6:0];
+      for(int i = 0; i < 82; i++) if(r_l3b_fp[i]) w_msb = i[6:0];
    end
    wire signed [8:0] w_lods = $signed({2'b0, w_msb}) - 9'sd9;  // log2 = msb + TEX_LW - 16
-   wire [2:0] w_lod = (w_lods < 0) ? 3'd0 : (w_lods > 9'sd7) ? 3'd7 : w_lods[2:0];
+   logic              r_l4_valid;
+   logic [31:0]       r_l4_addr;
+   logic [Z_W-1:0]    r_l4_depth;
+   logic [23:0]       r_l4_col;
+   logic [31:0]       r_l4_u, r_l4_v;
+   logic [2:0]        r_l4_lod;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_l4_valid <= 1'b0;
+	else if(w_pipe_en) r_l4_valid <= r_l3b_valid;
+	if(w_pipe_en)
+	  begin
+	     r_l4_addr  <= r_l3b_addr;
+	     r_l4_depth <= r_l3b_depth;
+	     r_l4_col   <= r_l3b_col;
+	     r_l4_u     <= r_l3b_u;
+	     r_l4_v     <= r_l3b_v;
+	     r_l4_lod   <= (w_lods < 0) ? 3'd0 : (w_lods > 9'sd7) ? 3'd7 : w_lods[2:0];
+	  end
+     end
 
-   // ---- texel coordinate at mip level L = w_lod ----
+   // A: texel coordinate at mip level L = r_l4_lod
    // texel coord = u*(TEX_W>>L); half-texel offset; base texel + Q(TEX_FB) frac.
    // L scales the shift (9+L) and the REPEAT wrap mask ((TEX_W>>L)-1).
+   wire [2:0]         w_lod  = r_l4_lod;
    wire [3:0]         w_sh   = TEX_FB[3:0] + {1'b0, w_lod};      // 9 + L
    wire signed [31:0] w_half = $signed(32'd1) << (w_sh - 4'd1);  // 0.5 texel
-   wire signed [31:0] w_su = $signed(r_s_u) - w_half;
-   wire signed [31:0] w_sv = $signed(r_s_v) - w_half;
+   wire signed [31:0] w_su = $signed(r_l4_u) - w_half;
+   wire signed [31:0] w_sv = $signed(r_l4_v) - w_half;
    wire signed [31:0] w_i0 = w_su >>> w_sh;
    wire signed [31:0] w_j0 = w_sv >>> w_sh;
    wire [31:0]        w_sufr = $unsigned(w_su) >> w_lod;        // frac bits to low end
@@ -412,14 +526,36 @@ module rasterize(clk, rst, go,
    wire [TEX_LW-1:0] w_colp1 = w_px ? w_x0 : w_x1;   // x-parity 1 column
    wire [TEX_LW-1:0] w_rowp0 = w_py ? w_y1 : w_y0;
    wire [TEX_LW-1:0] w_rowp1 = w_py ? w_y0 : w_y1;
-   wire [TEXB_AW-1:0] w_ab0 = {w_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab1 = {w_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab2 = {w_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-   wire [TEXB_AW-1:0] w_ab3 = {w_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+   logic              r_a_valid;
+   logic [31:0]       r_a_addr;
+   logic [Z_W-1:0]    r_a_depth;
+   logic [23:0]       r_a_col;
+   logic [TEX_FB-1:0] r_a_fx, r_a_fy;
+   logic              r_a_px, r_a_py;
+   logic [TEXB_AW-1:0] r_a_ab0, r_a_ab1, r_a_ab2, r_a_ab3;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_a_valid <= 1'b0;
+	else if(w_pipe_en) r_a_valid <= r_l4_valid;
+	if(w_pipe_en)
+	  begin
+	     r_a_addr  <= r_l4_addr;
+	     r_a_depth <= r_l4_depth;
+	     r_a_col   <= r_l4_col;
+	     r_a_fx    <= w_fx;
+	     r_a_fy    <= w_fy;
+	     r_a_px    <= w_px;
+	     r_a_py    <= w_py;
+	     r_a_ab0   <= {w_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+	     r_a_ab1   <= {w_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+	     r_a_ab2   <= {w_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
+	     r_a_ab3   <= {w_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+	  end
+     end
 
    // ---- texture: 4 banks split by (x&1,y&1) -> the 2x2 quad is 1 texel per
    // bank, so all four read in parallel.  Host loads linearly; route to bank
-   // {tv[0],tu[0]} at addr (tv>>1,tu>>1).
+   // {tv[0],tu[0]} at addr (tv>>1,tu>>1).  Read at A's registered addresses.
    logic [23:0] r_tex0 [0:TEXB_N-1];  // x even, y even
    logic [23:0] r_tex1 [0:TEXB_N-1];  // x odd,  y even
    logic [23:0] r_tex2 [0:TEXB_N-1];  // x even, y odd
@@ -433,14 +569,14 @@ module rasterize(clk, rst, go,
 	if(tex_we & (tex_wbank == 2'd3)) r_tex3[tex_waddr[TEXB_AW-1:0]] <= tex_wdata;
 	if(w_pipe_en)
 	  begin
-	     r_z1_b0 <= r_tex0[w_ab0];
-	     r_z1_b1 <= r_tex1[w_ab1];
-	     r_z1_b2 <= r_tex2[w_ab2];
-	     r_z1_b3 <= r_tex3[w_ab3];
+	     r_z1_b0 <= r_tex0[r_a_ab0];
+	     r_z1_b1 <= r_tex1[r_a_ab1];
+	     r_z1_b2 <= r_tex2[r_a_ab2];
+	     r_z1_b3 <= r_tex3[r_a_ab3];
 	  end
      end
 
-   // Z1 stage: fragment + depth read + the quad fractions/parities, aligned
+   // Z1 stage: fragment + depth/dst reads + the quad fractions/parities, aligned
    logic        r_z1_valid;
    logic [31:0] r_z1_addr;
    logic [Z_W-1:0] r_z1_depth;
@@ -452,38 +588,48 @@ module rasterize(clk, rst, go,
    always_ff@(posedge clk)
      begin
 	if(rst) r_z1_valid <= 1'b0;
-	else if(w_pipe_en) r_z1_valid <= r_s_valid;
+	else if(w_pipe_en) r_z1_valid <= r_a_valid;
 	if(w_pipe_en)
 	  begin
-	     r_z1_addr  <= r_s_addr;
-	     r_z1_depth <= r_s_depth;
-	     r_z1_col   <= r_s_col;
-	     r_z1_fx    <= w_fx;
-	     r_z1_fy    <= w_fy;
-	     r_z1_px    <= w_px;
-	     r_z1_py    <= w_py;
+	     r_z1_addr  <= r_a_addr;
+	     r_z1_depth <= r_a_depth;
+	     r_z1_col   <= r_a_col;
+	     r_z1_fx    <= r_a_fx;
+	     r_z1_fy    <= r_a_fy;
+	     r_z1_px    <= r_a_px;
+	     r_z1_py    <= r_a_py;
 	  end
      end
 
-   // depth test; when z_enable is off, every covered fragment passes (painter's).
-   // blended passes (mode != 0) use <= so a coplanar overlay (e.g. the lightmap
-   // pass, same geometry as the base pass) passes the equal-depth test; opaque
-   // uses strict < to avoid coplanar z-fighting.
-   wire w_zle       = (r_blend_mode != 2'd0);
-   wire w_zpass     = r_z1_valid & (~r_z_enable | (w_zle ? (r_z1_depth <= r_z1_zold)
-						        : (r_z1_depth <  r_z1_zold)));
-   wire w_frag_wr   = w_pipe_en & w_zpass;     // commit this fragment
-
-   // depth BRAM: clear takes priority, else conditional depth write; one read
-   // port issues the depth at the SHIFT-stage address (Z1's input) each cycle.
+   // Z2 stage: the BRAM read data registered once more, so the RAMs' own output
+   // registers absorb it and the deep (cascaded) reads end at a flop
+   logic        r_z2_valid;
+   logic [31:0] r_z2_addr;
+   logic [Z_W-1:0] r_z2_depth, r_z2_zold;
+   logic [23:0] r_z2_col, r_z2_fbold;
+   logic [TEX_FB-1:0] r_z2_fx, r_z2_fy;
+   logic        r_z2_px, r_z2_py;
+   logic [23:0] r_z2_b0, r_z2_b1, r_z2_b2, r_z2_b3;
    always_ff@(posedge clk)
      begin
-	if(r_clearing)
-	  r_zb[r_clear_cnt[FB_AW-1:0]] <= {Z_W{1'b1}};
-	else if(w_frag_wr & (r_blend_mode == 2'd0))   // only opaque writes depth
-	  r_zb[r_z1_addr[FB_AW-1:0]] <= r_z1_depth;
+	if(rst) r_z2_valid <= 1'b0;
+	else if(w_pipe_en) r_z2_valid <= r_z1_valid;
 	if(w_pipe_en)
-	  r_z1_zold <= r_zb[r_s_addr[FB_AW-1:0]];
+	  begin
+	     r_z2_addr  <= r_z1_addr;
+	     r_z2_depth <= r_z1_depth;
+	     r_z2_zold  <= r_z1_zold;
+	     r_z2_col   <= r_z1_col;
+	     r_z2_fbold <= r_z1_fbold;
+	     r_z2_fx    <= r_z1_fx;
+	     r_z2_fy    <= r_z1_fy;
+	     r_z2_px    <= r_z1_px;
+	     r_z2_py    <= r_z1_py;
+	     r_z2_b0    <= r_z1_b0;
+	     r_z2_b1    <= r_z1_b1;
+	     r_z2_b2    <= r_z1_b2;
+	     r_z2_b3    <= r_z1_b3;
+	  end
      end
 
    // ---- bilinear blend + GL_MODULATE ----
@@ -531,30 +677,122 @@ module rasterize(clk, rst, go,
       end
    endfunction
 
+   // B1: corner un-swizzle, x-lerps; depth test.  When z_enable is off, every
+   // covered fragment passes (painter's).  Blended passes (mode != 0) use <= so
+   // a coplanar overlay (e.g. the lightmap pass, same geometry as the base
+   // pass) passes the equal-depth test; opaque uses strict < to avoid coplanar
+   // z-fighting.
    logic [23:0] w_bank [0:3];
-   assign w_bank[0] = r_z1_b0;
-   assign w_bank[1] = r_z1_b1;
-   assign w_bank[2] = r_z1_b2;
-   assign w_bank[3] = r_z1_b3;
-   wire [23:0] w_t00 = w_bank[{r_z1_py,  r_z1_px}];
-   wire [23:0] w_t10 = w_bank[{r_z1_py, ~r_z1_px}];
-   wire [23:0] w_t01 = w_bank[{~r_z1_py, r_z1_px}];
-   wire [23:0] w_t11 = w_bank[{~r_z1_py,~r_z1_px}];
-   wire [7:0] w_tr = lerp8(lerp8(w_t00[23:16], w_t10[23:16], r_z1_fx),
-			   lerp8(w_t01[23:16], w_t11[23:16], r_z1_fx), r_z1_fy);
-   wire [7:0] w_tg = lerp8(lerp8(w_t00[15:8],  w_t10[15:8],  r_z1_fx),
-			   lerp8(w_t01[15:8],  w_t11[15:8],  r_z1_fx), r_z1_fy);
-   wire [7:0] w_tb = lerp8(lerp8(w_t00[7:0],   w_t10[7:0],   r_z1_fx),
-			   lerp8(w_t01[7:0],   w_t11[7:0],   r_z1_fx), r_z1_fy);
+   assign w_bank[0] = r_z2_b0;
+   assign w_bank[1] = r_z2_b1;
+   assign w_bank[2] = r_z2_b2;
+   assign w_bank[3] = r_z2_b3;
+   wire [23:0] w_t00 = w_bank[{r_z2_py,  r_z2_px}];
+   wire [23:0] w_t10 = w_bank[{r_z2_py, ~r_z2_px}];
+   wire [23:0] w_t01 = w_bank[{~r_z2_py, r_z2_px}];
+   wire [23:0] w_t11 = w_bank[{~r_z2_py,~r_z2_px}];
+   wire w_zle   = (r_blend_mode != 2'd0);
+   wire w_zpass = r_z2_valid & (~r_z_enable | (w_zle ? (r_z2_depth <= r_z2_zold)
+						   : (r_z2_depth <  r_z2_zold)));
+   logic           r_b1_valid;            // a depth-passing fragment
+   logic [31:0]    r_b1_addr;
+   logic [Z_W-1:0] r_b1_depth;
+   logic [23:0]    r_b1_col, r_b1_fbold;
+   logic [TEX_FB-1:0] r_b1_fy;
+   logic [23:0]    r_b1_top, r_b1_bot;    // x-lerped rows {r,g,b}
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_b1_valid <= 1'b0;
+	else if(w_pipe_en) r_b1_valid <= w_zpass;
+	if(w_pipe_en)
+	  begin
+	     r_b1_addr  <= r_z2_addr;
+	     r_b1_depth <= r_z2_depth;
+	     r_b1_col   <= r_z2_col;
+	     r_b1_fbold <= r_z2_fbold;
+	     r_b1_fy    <= r_z2_fy;
+	     r_b1_top   <= {lerp8(w_t00[23:16], w_t10[23:16], r_z2_fx),
+			    lerp8(w_t00[15:8],  w_t10[15:8],  r_z2_fx),
+			    lerp8(w_t00[7:0],   w_t10[7:0],   r_z2_fx)};
+	     r_b1_bot   <= {lerp8(w_t01[23:16], w_t11[23:16], r_z2_fx),
+			    lerp8(w_t01[15:8],  w_t11[15:8],  r_z2_fx),
+			    lerp8(w_t01[7:0],   w_t11[7:0],   r_z2_fx)};
+	  end
+     end
 
-   // src color = texel * Gouraud color (GL_MODULATE)
-   wire [23:0] w_color = {mul255(w_tr, r_z1_col[23:16]),
-			  mul255(w_tg, r_z1_col[15:8]),
-			  mul255(w_tb, r_z1_col[7:0])};
-   // blend src over/with the framebuffer dst (r_z1_fbold), per blend mode
-   wire [23:0] w_blended = {blend_c(w_color[23:16], r_z1_fbold[23:16], r_tri_alpha, r_blend_mode),
-			    blend_c(w_color[15:8],  r_z1_fbold[15:8],  r_tri_alpha, r_blend_mode),
-			    blend_c(w_color[7:0],   r_z1_fbold[7:0],   r_tri_alpha, r_blend_mode)};
+   // B2: y-lerp -> texel
+   logic           r_b2_valid;
+   logic [31:0]    r_b2_addr;
+   logic [Z_W-1:0] r_b2_depth;
+   logic [23:0]    r_b2_col, r_b2_fbold, r_b2_tex;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_b2_valid <= 1'b0;
+	else if(w_pipe_en) r_b2_valid <= r_b1_valid;
+	if(w_pipe_en)
+	  begin
+	     r_b2_addr  <= r_b1_addr;
+	     r_b2_depth <= r_b1_depth;
+	     r_b2_col   <= r_b1_col;
+	     r_b2_fbold <= r_b1_fbold;
+	     r_b2_tex   <= {lerp8(r_b1_top[23:16], r_b1_bot[23:16], r_b1_fy),
+			    lerp8(r_b1_top[15:8],  r_b1_bot[15:8],  r_b1_fy),
+			    lerp8(r_b1_top[7:0],   r_b1_bot[7:0],   r_b1_fy)};
+	  end
+     end
+
+   // C: src color = texel * Gouraud color (GL_MODULATE)
+   logic           r_c_valid;
+   logic [31:0]    r_c_addr;
+   logic [Z_W-1:0] r_c_depth;
+   logic [23:0]    r_c_fbold, r_c_color;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_c_valid <= 1'b0;
+	else if(w_pipe_en) r_c_valid <= r_b2_valid;
+	if(w_pipe_en)
+	  begin
+	     r_c_addr  <= r_b2_addr;
+	     r_c_depth <= r_b2_depth;
+	     r_c_fbold <= r_b2_fbold;
+	     r_c_color <= {mul255(r_b2_tex[23:16], r_b2_col[23:16]),
+			   mul255(r_b2_tex[15:8],  r_b2_col[15:8]),
+			   mul255(r_b2_tex[7:0],   r_b2_col[7:0])};
+	  end
+     end
+
+   // D: blend src over/with the framebuffer dst, per blend mode; the D
+   // registers drive the color + depth writes
+   logic           r_d_valid;
+   logic [31:0]    r_d_addr;
+   logic [Z_W-1:0] r_d_depth;
+   logic [23:0]    r_d_blended;
+   always_ff@(posedge clk)
+     begin
+	if(rst) r_d_valid <= 1'b0;
+	else if(w_pipe_en) r_d_valid <= r_c_valid;
+	if(w_pipe_en)
+	  begin
+	     r_d_addr    <= r_c_addr;
+	     r_d_depth   <= r_c_depth;
+	     r_d_blended <= {blend_c(r_c_color[23:16], r_c_fbold[23:16], r_tri_alpha, r_blend_mode),
+			     blend_c(r_c_color[15:8],  r_c_fbold[15:8],  r_tri_alpha, r_blend_mode),
+			     blend_c(r_c_color[7:0],   r_c_fbold[7:0],   r_tri_alpha, r_blend_mode)};
+	  end
+     end
+   wire w_frag_wr = w_pipe_en & r_d_valid;     // commit this fragment
+
+   // depth BRAM: clear takes priority, else the depth write from D; one read
+   // port issues the depth at A's address (Z1's input) each cycle.
+   always_ff@(posedge clk)
+     begin
+	if(r_clearing)
+	  r_zb[r_clear_cnt[FB_AW-1:0]] <= {Z_W{1'b1}};
+	else if(w_frag_wr & (r_blend_mode == 2'd0))   // only opaque writes depth
+	  r_zb[r_d_addr[FB_AW-1:0]] <= r_d_depth;
+	if(w_pipe_en)
+	  r_z1_zold <= r_zb[r_a_addr[FB_AW-1:0]];
+     end
 
    // ---- color framebuffer (BRAM): clear, conditional blended write, dst read
    // for blending, and the host scan-out read ----
@@ -564,9 +802,9 @@ module rasterize(clk, rst, go,
 	if(r_clearing)
 	  r_fb[r_clear_cnt[FB_AW-1:0]] <= 24'h0;
 	else if(w_frag_wr)
-	  r_fb[r_z1_addr[FB_AW-1:0]] <= w_blended;
+	  r_fb[r_d_addr[FB_AW-1:0]] <= r_d_blended;
 	if(w_pipe_en)
-	  r_z1_fbold <= r_fb[r_s_addr[FB_AW-1:0]];   // dst for next fragment's blend
+	  r_z1_fbold <= r_fb[r_a_addr[FB_AW-1:0]];   // dst for this fragment's blend
 	fb_rdata <= r_fb[fb_raddr[FB_AW-1:0]];
      end
 
@@ -805,8 +1043,10 @@ module rasterize(clk, rst, go,
 	    end
 	  DRAIN:
 	    begin
-	       // wait for the reciprocal, multiply and depth-test stages to flush
-	       if(!w_recip_busy & !r_m_valid & !r_s_valid & !r_z1_valid)
+	       // wait for every pipeline stage to flush
+	       if(!w_recip_busy & !r_m_valid & !r_s_valid & !r_l1_valid & !r_l2_valid &
+		  !r_l3_valid & !r_l3b_valid & !r_l4_valid & !r_a_valid & !r_z1_valid & !r_z2_valid &
+		  !r_b1_valid & !r_b2_valid & !r_c_valid & !r_d_valid)
 		 begin
 		    n_done = 1'b1;
 		    n_state = IDLE;
