@@ -4,7 +4,7 @@
 
 namespace {
   const float PI = 3.14159265358979f;
-  const float DEPTH_MAX = 65535.0f;   // window depth quantized to 16 bits
+  const float DEPTH_MAX = 16777215.0f;   // window depth on the engine's full 24-bit range
 
   struct v3 { float x, y, z; };
   struct v4 { float x, y, z, w; };

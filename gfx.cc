@@ -38,9 +38,17 @@ extern "C" void submit_triangle(hw_rast *d,
   hw_draw_tri(d, &t);
 }
 
+// Packed mip layout per bank (matches rasterize.sv tex_addr): level L holds
+// (64 >> L)^2 texels per bank (1 for the last two levels) at tex_base(L).
+static uint32_t tex_packed_addr(int L, int row, int col) {
+  static const uint32_t base[8] = {0, 4096, 5120, 5376, 5440, 5456, 5460, 5461};
+  const int sh = L >= 6 ? 0 : 6 - L;
+  return base[L] + ((uint32_t)row << sh) + (uint32_t)col;
+}
+
 // Build the box-filter mip chain from a dim x dim RGB image and upload each
-// level to bank {y&1,x&1} at the uniform (dim/2)x(dim/2) slot the RTL expects:
-// addr = (level<<12) | ((y>>1)<<6) | (x>>1).  dim must be the RTL texture size.
+// level to bank {y&1,x&1} at its packed address (tex_packed_addr).  dim must
+// be the RTL texture size.
 extern "C" void load_texture(hw_rast *d, const uint8_t *rgb, int dim) {
   static uint8_t mip[8][128][128][3];
   int levels = 0;
@@ -62,7 +70,7 @@ extern "C" void load_texture(hw_rast *d, const uint8_t *rgb, int dim) {
     for(int y = 0; y < Dl; y++)
       for(int x = 0; x < Dl; x++) {
         int bank = ((y & 1) << 1) | (x & 1);
-        uint32_t addr = (L << 12) | ((y >> 1) << 6) | (x >> 1);
+        uint32_t addr = tex_packed_addr(L, y >> 1, x >> 1);
         uint32_t texel = ((uint32_t)mip[L][y][x][0] << 16)
                        | ((uint32_t)mip[L][y][x][1] << 8) | mip[L][y][x][2];
         hw_tex_write(d, bank, addr, texel);

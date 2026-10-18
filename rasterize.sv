@@ -46,11 +46,14 @@ module rasterize(clk, rst, go,
    localparam TEX_AW = 2 * TEX_LW;
    // bilinear: 4 banks split by (x&1,y&1) for a 1-cycle 2x2 fetch
    localparam TEX_FB  = 16 - TEX_LW; // fractional bits of the texel coordinate
-   // mip chain stacked in each bank: a uniform (TEX_W/2)^2 slot per level, so a
-   // bank address is just {level, row>>1, col>>1}.
+   // mip chain packed in each bank: level L holds (TEX_W/2 >> L)^2 texels per
+   // bank (1 for the last two levels) at tex_base(L), so a bank address is
+   // tex_base(L) + (row>>1) * (TEX_W/2 >> L) + (col>>1): 5462 entries per bank
+   // instead of a uniform (TEX_W/2)^2 slot per level (32768).  gfx.cc's
+   // load_texture uses the same mapping.
    localparam MIP_LEVELS = TEX_LW + 1;             // 128..1 -> 8 levels
-   localparam TEXB_SLOT  = (TEX_W/2) * (TEX_W/2);  // per-level per-bank (64x64)
-   localparam TEXB_N     = MIP_LEVELS * TEXB_SLOT;
+   localparam TEXB_SLOT  = (TEX_W/2) * (TEX_W/2);  // level 0 per bank (64x64)
+   localparam TEXB_N     = (TEXB_SLOT * 4 - 1) / 3 + 1;
    localparam TEXB_AW    = $clog2(TEXB_N);
 
    // on-chip color + depth buffer geometry.  SCREEN_RES is a build-time knob
@@ -68,7 +71,13 @@ module rasterize(clk, rst, go,
    localparam SCREEN_H = `SCREEN_HEIGHT;
    localparam FB_N  = SCREEN_W * SCREEN_H;
    localparam FB_AW = $clog2(FB_N);
-   localparam Z_W   = 24;   // depth buffer width (fits DEPTH_INT_BITS=25)
+   // depth buffer width: the top Z_BITS of the 24-bit depth (TinyGL maps its
+   // depth range onto 24 bits).  18 fits a BRAM's 18-bit port exactly.
+`ifndef Z_BITS
+ `define Z_BITS 18
+`endif
+   localparam Z_W   = `Z_BITS;
+   localparam Z_SH  = 24 - Z_W;   // low depth bits dropped
 
    input logic clk;
    input logic rst;
@@ -301,7 +310,7 @@ module rasterize(clk, rst, go,
 	if(w_pipe_en)
 	  begin
 	     r_m_addr  <= r_sb_addr[3];
-	     r_m_depth <= r_sb_depth[3][Z_W-1:0];
+	     r_m_depth <= r_sb_depth[3][23:Z_SH];
 	     r_m_e     <= w_recip_e;
 	     r_m_col   <= r_sb_col[3];
 	     r_m_wq4   <= w_recip_y >> w_recip_e;
@@ -526,6 +535,25 @@ module rasterize(clk, rst, go,
    wire [TEX_LW-1:0] w_colp1 = w_px ? w_x0 : w_x1;   // x-parity 1 column
    wire [TEX_LW-1:0] w_rowp0 = w_py ? w_y1 : w_y0;
    wire [TEX_LW-1:0] w_rowp1 = w_py ? w_y0 : w_y1;
+   // packed mip base and row stride (log2) per level, for TEX_LW = 7
+   function automatic logic [TEXB_AW-1:0] tex_base(input logic [2:0] l);
+      case(l)
+	3'd0: tex_base = 'd0;
+	3'd1: tex_base = 'd4096;
+	3'd2: tex_base = 'd5120;
+	3'd3: tex_base = 'd5376;
+	3'd4: tex_base = 'd5440;
+	3'd5: tex_base = 'd5456;
+	3'd6: tex_base = 'd5460;
+	default: tex_base = 'd5461;
+      endcase
+   endfunction
+   function automatic logic [TEXB_AW-1:0] tex_addr(input logic [2:0] l, input logic [TEX_LW-2:0] row,
+						 input logic [TEX_LW-2:0] col);
+      logic [2:0] sh;
+      sh = (l >= 3'd6) ? 3'd0 : (3'd6 - l);
+      tex_addr = tex_base(l) + (TEXB_AW'(row) << sh) + TEXB_AW'(col);
+   endfunction
    logic              r_a_valid;
    logic [31:0]       r_a_addr;
    logic [Z_W-1:0]    r_a_depth;
@@ -546,10 +574,10 @@ module rasterize(clk, rst, go,
 	     r_a_fy    <= w_fy;
 	     r_a_px    <= w_px;
 	     r_a_py    <= w_py;
-	     r_a_ab0   <= {w_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-	     r_a_ab1   <= {w_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
-	     r_a_ab2   <= {w_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]};
-	     r_a_ab3   <= {w_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]};
+	     r_a_ab0   <= tex_addr(w_lod, w_rowp0[TEX_LW-1:1], w_colp0[TEX_LW-1:1]);
+	     r_a_ab1   <= tex_addr(w_lod, w_rowp0[TEX_LW-1:1], w_colp1[TEX_LW-1:1]);
+	     r_a_ab2   <= tex_addr(w_lod, w_rowp1[TEX_LW-1:1], w_colp0[TEX_LW-1:1]);
+	     r_a_ab3   <= tex_addr(w_lod, w_rowp1[TEX_LW-1:1], w_colp1[TEX_LW-1:1]);
 	  end
      end
 
