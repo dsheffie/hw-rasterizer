@@ -16,6 +16,27 @@
 #include <unistd.h>
 #endif
 
+/* HW_RAST_TIMING: per-operation wall-clock accounting, printed at hw_close.
+ * Compiled out by default (two clock_gettime calls per operation). */
+#ifdef HW_RAST_TIMING
+#include <time.h>
+static inline uint64_t now_ns() {
+  timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+enum { T_CLEAR, T_TEX, T_WAIT, T_REGS, T_DRAIN, T_SCAN, T_N };
+static const char *t_name[T_N] = {
+  "clear (cmd + 64000-cycle clear)", "texture upload", "draw: wait for previous tri",
+  "draw: register writes + go", "present: drain last tri + swap", "scan-out (FB_DATA reads)"
+};
+#define T_BEGIN() uint64_t t_begin_ = now_ns()
+#define T_END(d, k) do { uint64_t t_e_ = now_ns(); (d)->t_ns[k] += t_e_ - t_begin_; (d)->t_cnt[k]++; t_begin_ = t_e_; } while(0)
+#else
+#define T_BEGIN() do { } while(0)
+#define T_END(d, k) do { } while(0)
+#endif
+
 // register word indices (rast_axi.v)
 enum {
   I_ID = 0, I_CTRL = 1, I_STATUS = 2, I_X_DIM = 3, I_Y_DIM = 4,
@@ -40,6 +61,9 @@ struct hw_rast {
 #endif
   int w, h;
   uint32_t tex_next;   // TEX_ADDR after the last texel write
+#ifdef HW_RAST_TIMING
+  uint64_t t_ns[T_N], t_cnt[T_N];
+#endif
 };
 
 #ifdef HW_RAST_AXI_SIM
@@ -94,6 +118,12 @@ extern "C" hw_rast *hw_open(int width, int height) {
   hw_rast *d = new hw_rast;
   d->w = width; d->h = height;
   d->tex_next = ~0u;
+#ifdef HW_RAST_TIMING
+  for(int k = 0; k < T_N; k++) {
+    d->t_ns[k] = 0;
+    d->t_cnt[k] = 0;
+  }
+#endif
 #ifdef HW_RAST_AXI_SIM
   d->tb = new Vrast_axi;
   Vrast_axi *tb = d->tb;
@@ -130,6 +160,16 @@ extern "C" hw_rast *hw_open(int width, int height) {
 
 extern "C" void hw_close(hw_rast *d) {
   wait_idle(d);
+#ifdef HW_RAST_TIMING
+  fprintf(stderr, "hw_rast_axi timing (totals over the run):\n");
+  for(int k = 0; k < T_N; k++) {
+    if(d->t_cnt[k] == 0) {
+      continue;
+    }
+    fprintf(stderr, "  %-34s %10.3f ms  %8lu calls  %8.3f us/call\n", t_name[k],
+	    d->t_ns[k] * 1e-6, (unsigned long)d->t_cnt[k], d->t_ns[k] * 1e-3 / d->t_cnt[k]);
+  }
+#endif
 #ifdef HW_RAST_AXI_SIM
   delete d->tb;
 #else
@@ -140,27 +180,33 @@ extern "C" void hw_close(hw_rast *d) {
 }
 
 extern "C" void hw_clear(hw_rast *d) {
+  T_BEGIN();
   wait_idle(d);
   wr(d, I_CTRL, CTRL_CLEAR);
   wait_idle(d);
+  T_END(d, T_CLEAR);
 }
 
 // TEX_ADDR auto-increments, so a run of consecutive texels in one bank costs
 // one write each; only a jump (or bank change) rewrites the address.
 extern "C" void hw_tex_write(hw_rast *d, int bank, uint32_t addr, uint32_t rgb) {
   uint32_t a = ((uint32_t)bank << 30) | addr;
+  T_BEGIN();
   wait_idle(d);
   if(a != d->tex_next) {
     wr(d, I_TEX_ADDR, a);
   }
   wr(d, I_TEX_DATA, rgb);
   d->tex_next = a + 1;
+  T_END(d, T_TEX);
 }
 
 // The engine reads the planes for the whole render, so wait for the previous
 // triangle before rewriting them; return as soon as this one is started.
 extern "C" void hw_draw_tri(hw_rast *d, const hw_tri *t) {
+  T_BEGIN();
   wait_idle(d);
+  T_END(d, T_WAIT);
   wr(d, I_V0X + 0, t->v0x); wr(d, I_V0X + 1, t->v0y);
   wr(d, I_V0X + 2, t->v1x); wr(d, I_V0X + 3, t->v1y);
   wr(d, I_V0X + 4, t->v2x); wr(d, I_V0X + 5, t->v2y);
@@ -174,6 +220,7 @@ extern "C" void hw_draw_tri(hw_rast *d, const hw_tri *t) {
   wr(d, I_CB_START + 0, t->cb_start); wr(d, I_CB_START + 1, t->dcbdx); wr(d, I_CB_START + 2, t->dcbdy);
   wr(d, I_MODE, (t->blend_mode & 3) | ((uint32_t)t->alpha << 8) | ((uint32_t)(t->z_enable & 1) << 16));
   wr(d, I_CTRL, CTRL_GO);
+  T_END(d, T_REGS);
 }
 
 extern "C" void hw_swap(hw_rast *d) {
@@ -184,7 +231,9 @@ extern "C" void hw_swap(hw_rast *d) {
 // Present the frame just drawn (swap) and scan it out of the front buffer;
 // FB_DATA auto-increments.
 extern "C" void hw_fb_read(hw_rast *d, uint8_t *rgb) {
+  T_BEGIN();
   hw_swap(d);
+  T_END(d, T_DRAIN);
   wr(d, I_FB_ADDR, 0);
   const int n = d->w * d->h;
   for(int a = 0; a < n; a++) {
@@ -193,4 +242,5 @@ extern "C" void hw_fb_read(hw_rast *d, uint8_t *rgb) {
     rgb[3*a + 1] = (c >> 8) & 0xff;
     rgb[3*a + 2] = c & 0xff;
   }
+  T_END(d, T_SCAN);
 }

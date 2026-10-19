@@ -32,6 +32,26 @@ const int32_t imageHeight = SCREEN_HEIGHT;
 
 typedef uint8_t Rgb[3];
 
+/* HW_RAST_TIMING: per-stage frame-loop wall clock (pairs with the driver's
+ * per-operation accounting in hw_rast_axi.cc).  Compiled out by default. */
+#ifdef HW_RAST_TIMING
+#include <time.h>
+static inline uint64_t demo_now_ns() {
+  timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+enum { S_TEXGEN, S_LOAD, S_CLEAR, S_PROJ, S_DRAW, S_FBREAD, S_PPM, S_N };
+static const char *s_name[S_N] = {
+  "texture gen + upload", "obj load", "clear", "project_mesh",
+  "draw loop (setup + driver)", "hw_fb_read", "PPM write"
+};
+static uint64_t s_ns[S_N];
+#define S_MARK(k) do { uint64_t s_e_ = demo_now_ns(); s_ns[k] += s_e_ - s_t_; s_t_ = s_e_; } while(0)
+#else
+#define S_MARK(k) do { } while(0)
+#endif
+
 const int texDim = 128;   // must match TEX_LW (1<<7) in rasterize.sv
 
 // integer hash -> [0,1], used for tiling value noise
@@ -166,7 +186,12 @@ int main(int argc, char *argv[]) {
   }
 
   hw_rast *d = hw_open(imageWidth, imageHeight);
+#ifdef HW_RAST_TIMING
+  uint64_t s_t_ = demo_now_ns();
+  uint64_t n_tris = 0;
+#endif
   load_demo_texture(d, grid);         // generate + upload the demo texture
+  S_MARK(S_TEXGEN);
 
   // blend state (uniform for the whole model here)
   uint8_t blend_mode = blend ? 1 : 0; // 1 = src-over
@@ -178,6 +203,7 @@ int main(int argc, char *argv[]) {
 
   // depth buffer now lives on-chip (BRAM); cleared per frame via clear_zbuffer
   std::vector<model_tri> mesh = load_obj(model_path);
+  S_MARK(S_LOAD);
   if(mesh.empty()) {
     std::cerr << "failed to load model: " << model_path << "\n";
     return 1;
@@ -194,13 +220,23 @@ int main(int argc, char *argv[]) {
 #endif
 
   for(int f = 0; f < frames; f++) {
+#ifdef HW_RAST_TIMING
+    s_t_ = demo_now_ns();
+#endif
     hw_clear(d);                        // clear color + depth each frame
+    S_MARK(S_CLEAR);
 
     float yaw = 35.0f + (frames > 1 ? f * (360.0f / frames) : 0.0f);
     std::vector<screen_tri> tris = project_mesh(mesh, w, h, cull, yaw);
+    S_MARK(S_PROJ);
     for(const screen_tri &t : tris)
       render_triangle(d, t, blend_mode, blend_alpha);
+    S_MARK(S_DRAW);
     hw_fb_read(d, (uint8_t*)framebuffer);
+    S_MARK(S_FBREAD);
+#ifdef HW_RAST_TIMING
+    n_tris += tris.size();
+#endif
 
     char name[64];
     if(frames > 1) snprintf(name, sizeof name, "frame_%03d.ppm", f);
@@ -209,11 +245,19 @@ int main(int argc, char *argv[]) {
     ofs << "P6\n" << w << " " << h << "\n255\n";
     ofs.write((char*)framebuffer, w * h * 3);
     ofs.close();
+    S_MARK(S_PPM);
     std::cout << "frame " << f << " (yaw " << yaw << "): " << tris.size()
 	      << " tris -> " << name << "\n";
   }
 
   std::cout << "all done, " << frames << " frame(s)\n";
+#ifdef HW_RAST_TIMING
+  fprintf(stderr, "obj_demo timing: %d frame(s), %lu tris submitted\n", frames, (unsigned long)n_tris);
+  for(int k = 0; k < S_N; k++) {
+    fprintf(stderr, "  %-28s %10.3f ms total  %8.3f ms/frame\n", s_name[k],
+	    s_ns[k] * 1e-6, s_ns[k] * 1e-6 / frames);
+  }
+#endif
 
   delete [] framebuffer;
   hw_close(d);
