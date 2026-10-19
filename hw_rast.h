@@ -35,10 +35,12 @@ typedef struct hw_rast hw_rast;           // opaque engine handle
 
 hw_rast *hw_open(int width, int height);  // create + reset, set dimensions
 void     hw_close(hw_rast *d);
-void     hw_clear(hw_rast *d);                                   // clear color + depth
+void     hw_clear(hw_rast *d);                                   // clear back color buffer + depth
 void     hw_tex_write(hw_rast *d, int bank, uint32_t addr, uint32_t rgb); // load one texel
 void     hw_draw_tri(hw_rast *d, const hw_tri *t);              // load setup, run to done
-void     hw_fb_read(hw_rast *d, uint8_t *rgb);                   // scan out width*height*3
+void     hw_swap(hw_rast *d);                                    // back <-> front (double buffer)
+void     hw_fb_read(hw_rast *d, uint8_t *rgb);                   // swap, then scan out the frame just
+                                                                 // drawn: width*height*3
 
 #ifdef __cplusplus
 }

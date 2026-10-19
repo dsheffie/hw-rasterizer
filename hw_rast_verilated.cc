@@ -20,7 +20,7 @@ extern "C" hw_rast *hw_open(int width, int height) {
   d->tb = new Vrasterize;
   d->w = width; d->h = height;
   Vrasterize *tb = d->tb;
-  tb->clk = 0; tb->rst = 1; tb->go = 0; tb->clear = 0;
+  tb->clk = 0; tb->rst = 1; tb->go = 0; tb->clear = 0; tb->swap = 0;
   tb->tex_we = 0; tb->tex_wbank = 0; tb->blend_mode = 0; tb->tri_alpha = 255; tb->z_enable = 1;
   tb->fb_raddr = 0; tb->x_dim = width; tb->y_dim = height;
   tick(tb); tb->rst = 0; tick(tb);
@@ -72,7 +72,13 @@ extern "C" void hw_draw_tri(hw_rast *d, const hw_tri *t) {
   while(!tb->done) tick(tb);
 }
 
+extern "C" void hw_swap(hw_rast *d) {
+  d->tb->swap = 1; tick(d->tb); d->tb->swap = 0;
+}
+
+// Present the frame just drawn (swap) and scan it out of the front buffer.
 extern "C" void hw_fb_read(hw_rast *d, uint8_t *rgb) {
+  hw_swap(d);
   const int n = d->w * d->h;
   for(int a = 0; a < n; a++) {
     d->tb->fb_raddr = a; tick(d->tb);

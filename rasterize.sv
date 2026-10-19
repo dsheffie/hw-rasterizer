@@ -14,7 +14,7 @@ module rasterize(clk, rst, go,
 		 blend_mode, tri_alpha, z_enable,
 		 tex_we, tex_wbank, tex_waddr, tex_wdata,
 		 x_dim, y_dim,
-		 clear,
+		 clear, swap,
 		 fb_raddr, fb_rdata,
 		 clearing,
 		 done) ;
@@ -78,6 +78,12 @@ module rasterize(clk, rst, go,
 `endif
    localparam Z_W   = `Z_BITS;
    localparam Z_SH  = 24 - Z_W;   // low depth bits dropped
+   // color buffer storage: 24 (RGB888) or 16 (RGB565, expanded by bit
+   // replication on read).  The pipeline always computes 24-bit color.
+`ifndef FB_BITS
+ `define FB_BITS 16
+`endif
+   localparam FB_BITS = `FB_BITS;
 
    input logic clk;
    input logic rst;
@@ -120,10 +126,11 @@ module rasterize(clk, rst, go,
    input logic [31:0] y_dim;
 
 
-   input logic 	      clear;      // pulse to reset the color + depth buffers
-   input logic [31:0] fb_raddr;    // framebuffer read address (host scan-out)
+   input logic 	      clear;      // pulse to reset the back color buffer + depth
+   input logic 	      swap;       // pulse (while idle): exchange front and back
+   input logic [31:0] fb_raddr;    // front-buffer read address (host scan-out)
 
-   output logic [23:0] fb_rdata;   // framebuffer read data (registered)
+   output logic [23:0] fb_rdata;   // front-buffer read data (one cycle after fb_raddr)
    output logic        clearing;   // high while the buffers are being cleared
    output logic        done;
    
@@ -612,7 +619,7 @@ module rasterize(clk, rst, go,
    logic [TEX_FB-1:0] r_z1_fx, r_z1_fy;
    logic        r_z1_px, r_z1_py;
    logic [Z_W-1:0] r_z1_zold;
-   logic [23:0] r_z1_fbold;       // framebuffer dst at this fragment (for blend)
+   logic [23:0] w_z1_fbold;       // framebuffer dst at this fragment (for blend)
    always_ff@(posedge clk)
      begin
 	if(rst) r_z1_valid <= 1'b0;
@@ -648,7 +655,7 @@ module rasterize(clk, rst, go,
 	     r_z2_depth <= r_z1_depth;
 	     r_z2_zold  <= r_z1_zold;
 	     r_z2_col   <= r_z1_col;
-	     r_z2_fbold <= r_z1_fbold;
+	     r_z2_fbold <= w_z1_fbold;
 	     r_z2_fx    <= r_z1_fx;
 	     r_z2_fy    <= r_z1_fy;
 	     r_z2_px    <= r_z1_px;
@@ -822,19 +829,52 @@ module rasterize(clk, rst, go,
 	  r_z1_zold <= r_zb[r_a_addr[FB_AW-1:0]];
      end
 
-   // ---- color framebuffer (BRAM): clear, conditional blended write, dst read
-   // for blending, and the host scan-out read ----
-   logic [23:0] r_fb [0:FB_N-1];
+   // ---- color framebuffer: two BRAMs, front and back ----
+   // The rasterizer clears, reads (blend dst) and writes the BACK buffer; the
+   // host scans out the FRONT one; swap exchanges them.  Each RAM has one
+   // write port and one read port (address muxed by which buffer it is), so
+   // nothing is duplicated.  r_front = 0: fb0 is front, fb1 is back.
+   function automatic logic [FB_BITS-1:0] fb_pack(input logic [23:0] c);
+      if(FB_BITS == 16) fb_pack = FB_BITS'({c[23:19], c[15:10], c[7:3]});
+      else              fb_pack = FB_BITS'(c);
+   endfunction
+   function automatic logic [23:0] fb_unpack(input logic [FB_BITS-1:0] p);
+      logic [23:0] q;
+      q = 24'(p);
+      if(FB_BITS == 16)
+	begin
+	   q[23:16] = {p[15:11], p[15:13]};
+	   q[15:8]  = {p[10:5],  p[10:9]};
+	   q[7:0]   = {p[4:0],   p[4:2]};
+	end
+      fb_unpack = q;
+   endfunction
+   logic               r_front;
+   logic [FB_BITS-1:0] r_fb0 [0:FB_N-1];
+   logic [FB_BITS-1:0] r_fb1 [0:FB_N-1];
+   logic [FB_BITS-1:0] r_fb0_q, r_fb1_q;
+   wire                w_wr_any = r_clearing | w_frag_wr;
+   wire [FB_AW-1:0]    w_waddr  = r_clearing ? r_clear_cnt[FB_AW-1:0] : r_d_addr[FB_AW-1:0];
+   wire [FB_BITS-1:0]  w_wdata  = r_clearing ? {FB_BITS{1'b0}} : fb_pack(r_d_blended);
    always_ff@(posedge clk)
      begin
-	if(r_clearing)
-	  r_fb[r_clear_cnt[FB_AW-1:0]] <= 24'h0;
-	else if(w_frag_wr)
-	  r_fb[r_d_addr[FB_AW-1:0]] <= r_d_blended;
-	if(w_pipe_en)
-	  r_z1_fbold <= r_fb[r_a_addr[FB_AW-1:0]];   // dst for this fragment's blend
-	fb_rdata <= r_fb[fb_raddr[FB_AW-1:0]];
+	if(rst) r_front <= 1'b0;
+	else if(swap) r_front <= ~r_front;
      end
+   always_ff@(posedge clk)
+     begin
+	if(w_wr_any & r_front)                       // fb0 is back
+	  r_fb0[w_waddr] <= w_wdata;
+	r_fb0_q <= r_fb0[r_front ? r_a_addr[FB_AW-1:0] : fb_raddr[FB_AW-1:0]];
+     end
+   always_ff@(posedge clk)
+     begin
+	if(w_wr_any & ~r_front)                      // fb1 is back
+	  r_fb1[w_waddr] <= w_wdata;
+	r_fb1_q <= r_fb1[r_front ? fb_raddr[FB_AW-1:0] : r_a_addr[FB_AW-1:0]];
+     end
+   assign w_z1_fbold = fb_unpack(r_front ? r_fb0_q : r_fb1_q);   // back: blend dst
+   assign fb_rdata   = fb_unpack(r_front ? r_fb1_q : r_fb0_q);   // front: scan-out
 
    logic [31:0] t_w0, t_w1, t_w2;
    always_comb
