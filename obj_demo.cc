@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#ifndef NO_SDL
 #if __has_include(<SDL2/SDL.h>)
 #include <SDL2/SDL.h>
 #else
 #include <SDL.h>
+#endif
 #endif
 #include "hw_rast.h"
 #include "gfx.h"
@@ -19,8 +21,14 @@
 #ifndef SCREEN_RES
 #define SCREEN_RES 256          // must match the RTL SCREEN_RES (Makefile RES)
 #endif
-const int32_t imageWidth = SCREEN_RES;
-const int32_t imageHeight = SCREEN_RES;
+#ifndef SCREEN_WIDTH
+#define SCREEN_WIDTH SCREEN_RES
+#endif
+#ifndef SCREEN_HEIGHT
+#define SCREEN_HEIGHT SCREEN_RES
+#endif
+const int32_t imageWidth = SCREEN_WIDTH;
+const int32_t imageHeight = SCREEN_HEIGHT;
 
 typedef uint8_t Rgb[3];
 
@@ -86,6 +94,7 @@ static void render_triangle(hw_rast *d, const screen_tri &st,
   submit_triangle(d, pos, uv, invw, col, blend_mode, alpha, 1);   // depth test on
 }
 
+#ifndef NO_SDL
 // Live SDL viewer: spin the model and render each frame through the RTL into
 // an on-screen framebuffer.  Controls: Esc/Q quit, Space pause, Left/Right
 // nudge the yaw.  Returns nonzero if SDL can't open a window (e.g. headless).
@@ -137,6 +146,7 @@ static int run_sdl(hw_rast *d, Rgb *fb, int w, int h,
   SDL_Quit();
   return 0;
 }
+#endif
 
 int main(int argc, char *argv[]) {
   const char *model_path = "bigguy.obj";
@@ -175,11 +185,13 @@ int main(int argc, char *argv[]) {
   std::cout << "model " << model_path << ": " << mesh.size() << " triangles"
 	    << (cull ? " (backface cull on)" : " (backface cull off)") << "\n";
 
+#ifndef NO_SDL
   if(sdl) {
     int rc = run_sdl(d, framebuffer, w, h, mesh, cull, blend_mode, blend_alpha);
     delete [] framebuffer; hw_close(d);
     return rc;
   }
+#endif
 
   for(int f = 0; f < frames; f++) {
     hw_clear(d);                        // clear color + depth each frame

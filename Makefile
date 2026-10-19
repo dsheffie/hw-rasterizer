@@ -198,7 +198,24 @@ obj_dir_recip/Vrecip__ALL.a : recip.sv
 recip_tb: recip_tb.cc obj_dir_recip/Vrecip__ALL.a verilated.o
 	$(CXX) $(CXXFLAGS) -Iobj_dir_recip recip_tb.cc obj_dir_recip/*.o verilated.o -lpthread -o recip_tb
 
+# --- Ultra96 standalone (rast_axi.v, 320x200) ---
+# obj_demo_axi: native build ON THE BOARD (aarch64, no SDL), registers via /dev/mem.
+# obj_demo_axisim: the same driver against a Verilated rast_axi, for checking
+# the wrapper + driver against the direct model (hw_rasterize at the same size).
+AXI_DEFS = -DSCREEN_WIDTH=320 -DSCREEN_HEIGHT=200
+AXI_SRC = obj_demo.cc gfx.cc setup.cc obj.cc pipeline.cc
+
+obj_demo_axi: $(AXI_SRC) hw_rast_axi.cc hw_rast.h
+	$(CXX) -O2 -std=c++14 -DNO_SDL $(AXI_DEFS) $(AXI_SRC) hw_rast_axi.cc -o $@
+
+obj_dir_axi/Vrast_axi__ALL.a : rast_axi.v $(SV_SRC)
+	$(VERILATOR) --x-assign unique -cc rast_axi.v $(SV_SRC) --top-module rast_axi --Mdir obj_dir_axi +define+SCREEN_WIDTH=320 +define+SCREEN_HEIGHT=200
+	$(MAKE) OPT_FAST="-O3 -flto" -C obj_dir_axi -f Vrast_axi.mk
+
+obj_demo_axisim: $(AXI_SRC) hw_rast_axi.cc hw_rast.h obj_dir_axi/Vrast_axi__ALL.a verilated.o
+	$(CXX) $(CXXFLAGS) -DNO_SDL -DHW_RAST_AXI_SIM $(AXI_DEFS) -Iobj_dir_axi $(AXI_SRC) hw_rast_axi.cc obj_dir_axi/*.o verilated.o -lpthread -o $@
+
 -include $(DEP)
 
 clean:
-	rm -rf $(EXE) $(OBJ) $(DEP) obj_dir obj_dir_recip recip_tb
+	rm -rf $(EXE) $(OBJ) $(DEP) obj_dir obj_dir_recip recip_tb obj_dir_axi obj_demo_axi obj_demo_axisim
